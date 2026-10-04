@@ -146,6 +146,22 @@ a write, and attempts one subsequent Get 80. A missing readback does not turn an
 acknowledgement into verified physical control. No normal HA capability rule
 is relaxed by this tool, and its output does not contain keys or raw values.
 
+The completed manual OFF trial on module 1.0.4, flags 0x0002, discovered EOJ
+013501 and fresh writable power on 8766/05fe01. Eleven preparatory Get requests
+received matching replies. The twelfth request was the sole SetC 80=31; no
+frame arrived before its timeout. The tool reported write_unconfirmed and
+did not attempt readback after the missing acknowledgement. The user confirmed
+that the purifier remained on. This is an unanswered, ineffective observed
+write, not an explicit SetC_SNA rejection and not proof that every possible
+local control path is unavailable.
+
+The latest purifier display's Wi-Fi network/registration status has not yet
+been established. The earlier display reported Pairing not registered, but
+that observation predates these firmware 1.0.4 diagnostics. Neither the
+firmware update nor flags 0x0002 proves successful registration or explains
+the unavailable state/control. A current status observation is needed before
+attributing the results to an authentication or mode requirement.
+
 Further implementation needs a valid state exchange on this exact model and
 firmware, or primary protocol/mode documentation that explains how to obtain one.
 The KI-TX100EU manual's Wi-Fi settings do not document an ECHONET or HEMS mode.

@@ -16,7 +16,14 @@ Version 0.1.4 diagnostics also show six unanswered discovery requests on
 standard ECHONET UDP 3610 and a rejected power Get from controller source
 `05ff01` on the responding app port 8766. Changing the source object alone
 did not enable power reads on this physical KI-TX100EU. The selected state
-endpoint remains unset and no power write was attempted.
+endpoint remains unset and no power write was attempted during those read-only
+polls.
+
+A subsequent manual OFF trial on 8766/05fe01 sent one SetC after successful
+fresh discovery and maps. Its eleven preparatory reads received replies, but
+the power write received none before timeout. The user confirmed that the
+purifier did not turn off. Neither power reads nor an effective power command
+have been established on this tested firmware/configuration.
 
 **Full local purifier control is not yet confirmed on KI-TX100EU.** The TCP
 commands found in the APK configure the Wi-Fi module, rather than control the
@@ -143,9 +150,10 @@ raw packets and unknown property values. Share this output for further analysis.
 
 The user reports that the KI-TX100EU remains on during the rejected state Gets.
 Standby therefore does not explain the current observations. Get_SNA (52) is
-a response to a read; no physical power Set has yet been tested. The device's
-Set map advertises property 80, which provides a basis for an explicit write
-experiment without assuming that the write will work.
+a response to a read. The device's Set map advertises property 80, which
+provided a basis for an explicit write experiment. The completed OFF trial
+received no write acknowledgement and the user reported no physical effect.
+Repeating it in unchanged conditions would not establish a working protocol.
 
 The separate tool below verifies signed TCP info, freshly discovers the actual
 purifier object on 8766/05fe01, and checks that this endpoint advertises writable
