@@ -23,7 +23,8 @@ async def main(args):
     print("TCP 8765: signed get_info OK")
     print(f"Module firmware: {state.module.version}")
     print(f"Module flags: 0x{state.module.flags:04X}")
-    print(f"UDP 8766: {state.udp_status}")
+    print(f"UDP 3610 / 8766: {state.udp_status}")
+    print(f"Selected state/control port: {state.udp_port or 'none'}")
     print("UDP diagnostics:", state.udp_diagnostics)
     if state.object_id:
         print(f"Purifier object: {state.object_id.hex()}")

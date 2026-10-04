@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.3
+
+- First probe standard ECHONET UDP 3610 with controller EOJ 05ff01.
+- Bind the matching local reply port; keep app UDP 8766/05fe01 as a separate fallback.
+- Require power state and Set support from the same endpoint, and reuse it for writes/readback.
+- Export per-transport port/source evidence and the selected state/control port.
+- Bound each probe to 20 seconds and preserve already completed readings.
+- Serialize fixed reply ports across entries and release sockets after cancellation.
+- Add real loopback UDP tests for fixed replies, fallback selection and concurrent clients.
+
+All 29 protocol tests pass. Physical 0.1.2 diagnostics show that app UDP 8766
+rejects every individual state Get with 52. Standard 3610 state/control on
+KI-TX100EU remains unverified until tested on the physical purifier.
+
 ## 0.1.2
 
 - Retry every missing or zero-length state field with a single-property Get.
@@ -35,4 +49,3 @@ Physical-device UDP and on/off verification is still required.
 
 Physical KI-TX100EU tests have confirmed TCP get_info, module firmware 1.0.1.
 UDP readings and local power control remain experimental and unconfirmed.
-

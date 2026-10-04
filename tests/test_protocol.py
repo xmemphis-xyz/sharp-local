@@ -25,9 +25,9 @@ diagnostics = importlib.util.module_from_spec(diag_spec)
 diag_spec.loader.exec_module(diagnostics)
 
 
-def response(request, properties, esv=0x72, *, tid=None):
+def response(request, properties, esv=0x72, *, tid=None, destination=None):
     frame = bytearray(b"\x10\x81" + (request.tid if tid is None else tid).to_bytes(2, "big")
-                      + request.destination + request.source + bytes((esv, len(properties))))
+                      + request.destination + (destination or request.source) + bytes((esv, len(properties))))
     for code, value in properties.items():
         frame.extend((code, len(value)))
         frame.extend(value)
@@ -38,7 +38,8 @@ class FakePurifier(asyncio.DatagramProtocol):
     def __init__(self, *, writable=True, reject=False, wrong_first=False,
                  drop_maps=False, partial_maps=False, drop_batch=False,
                  ignore_write=False, empty_batch_esv=None, partial_batch=False,
-                 empty_all_readings=False):
+                 empty_all_readings=False, source=None, reply_port=None,
+                 wrong_destination=False, drop_read_codes=()):
         self.writable = writable
         self.reject = reject
         self.wrong_first = wrong_first
@@ -49,6 +50,10 @@ class FakePurifier(asyncio.DatagramProtocol):
         self.empty_batch_esv = empty_batch_esv
         self.partial_batch = partial_batch
         self.empty_all_readings = empty_all_readings
+        self.source = source
+        self.reply_port = reply_port
+        self.wrong_destination = wrong_destination
+        self.drop_read_codes = drop_read_codes
         self.received = []
         self.object_id = bytes.fromhex("013502")
         self.power = b"\x30"
@@ -56,9 +61,17 @@ class FakePurifier(asyncio.DatagramProtocol):
     def connection_made(self, transport):
         self.transport = transport
 
+    def send(self, packet, address):
+        if self.wrong_destination:
+            packet = packet[:7] + bytes.fromhex("05aa01") + packet[10:]
+        target = (address[0], self.reply_port) if self.reply_port else address
+        self.transport.sendto(packet, target)
+
     def datagram_received(self, data, address):
         request = p.decode_frame(data)
         self.received.append(request)
+        if self.source is not None and request.source != self.source:
+            return
         if request.destination == p.NODE:
             props = {0xD6: b"\x01" + self.object_id, 0x8C: b"test-module"}
         elif 0x8A in request.properties:
@@ -67,36 +80,49 @@ class FakePurifier(asyncio.DatagramProtocol):
         elif request.esv == 0x61:
             if not self.reject and not self.ignore_write:
                 self.power = request.properties[0x80]
-            self.transport.sendto(response(request, {0x80: b""}, 0x51 if self.reject else 0x71), address)
+            self.send(response(request, {0x80: b""}, 0x51 if self.reject else 0x71), address)
             return
         elif 0x9E in request.properties:
             if self.drop_maps:
                 return
             if self.partial_maps:
-                self.transport.sendto(response(request, {0x9F: b"\x01\x80"}, 0x52), address)
+                self.send(response(request, {0x9F: b"\x01\x80"}, 0x52), address)
                 return
             props = {0x9E: b"\x01\x80" if self.writable else b"\x00",
                      0x9F: b"\x03\x80\x84\xf1"}
         else:
+            if len(request.properties) == 1 and next(iter(request.properties)) in self.drop_read_codes:
+                return
             if self.empty_all_readings or (self.empty_batch_esv is not None and len(request.properties) > 1):
                 props = {code: b"" for code in request.properties}
-                self.transport.sendto(response(request, props, self.empty_batch_esv or 0x52), address)
+                self.send(response(request, props, self.empty_batch_esv or 0x52), address)
                 return
             if self.partial_batch and len(request.properties) > 1:
-                self.transport.sendto(response(request, {0x80: self.power, 0x84: b"", 0xF1: b""}, 0x52), address)
+                self.send(response(request, {0x80: self.power, 0x84: b"", 0xF1: b""}, 0x52), address)
                 return
             if self.drop_batch and len(request.properties) > 1:
                 return
             props = {0x80: self.power, 0x84: b"\x00\x09", 0xF1: b"\x00\x00\x00\x17\x2d"}
         if self.wrong_first:
-            self.transport.sendto(response(request, props, tid=(request.tid + 1) & 0xFFFF), address)
-        self.transport.sendto(response(request, props), address)
+            self.send(response(request, props, tid=(request.tid + 1) & 0xFFFF), address)
+        self.send(response(request, props), address)
 
 
 class ParserTests(unittest.TestCase):
     def test_exact_official_discovery_frame(self):
         self.assertEqual(p.encode_frame(1, p.NODE, 0x62, {0xD6: b"", 0x8C: b""}).hex(),
                          "1081000105fe010ef0016202d6008c00")
+
+    def test_standard_controller_frame_and_fixed_receive_port(self):
+        self.assertEqual(p.encode_frame(1, bytes.fromhex("013501"), 0x62,
+                         {0x80: b""}, source=p.CONTROLLER).hex(),
+                         "1081000105ff0101350162018000")
+        client = p.SharpLocalClient("127.0.0.1")
+        standard = client._channel()
+        self.assertEqual((standard.port, standard.bind_port, standard.source),
+                         (3610, 3610, p.CONTROLLER))
+        app = client._channel(port=p.UDP_PORT, source=p.SOURCE)
+        self.assertEqual((app.port, app.bind_port, app.source), (8766, 8766, p.SOURCE))
 
     def test_empty_and_truncated_values(self):
         frame = p.encode_frame(1, p.NODE, 0x62, {0x80: b""})
@@ -291,7 +317,8 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
                 batch = channel.diagnostics["responses"][3]
                 self.assertEqual(batch["esv"], f"{esv:02X}")
                 state = p.LocalState(p.ModuleInfo("1.0.4", 2, "fake"),
-                    "power_control_available", object_id, readings, writable)
+                    "power_control_available", object_id, readings, writable,
+                    udp_port=p.UDP_PORT, source_object=p.SOURCE)
                 self.assertTrue(state.power_controllable)
                 self.assertTrue(all(frame.esv == 0x62 for frame in fake.received))
 
@@ -319,6 +346,9 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
             state = p.LocalState(p.ModuleInfo("1.0.1", 0, "fake"), "read_only",
                                  b"\x01\x35\x01", properties, frozenset({0x80}))
             self.assertFalse(state.power_controllable)
+        state = p.LocalState(p.ModuleInfo("1.0.4", 2, "fake"), "no_readings",
+            b"\x01\x35\x01", {0x80: b"\x30"}, frozenset({0x80}))
+        self.assertFalse(state.power_controllable)
 
     async def test_client_checks_power_readback_without_repeating_write(self):
         for ignore_write in (False, True):
@@ -326,7 +356,8 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
                 channel, fake = await self.channel(ignore_write=ignore_write)
                 client = p.SharpLocalClient("127.0.0.1")
                 client.state = p.LocalState(p.ModuleInfo("1.0.1", 0, "fake"),
-                    "power_control_available", fake.object_id, {0x80: b"\x30"}, frozenset({0x80}))
+                    "power_control_available", fake.object_id, {0x80: b"\x30"}, frozenset({0x80}),
+                    udp_port=p.UDP_PORT, source_object=p.SOURCE)
                 with patch.object(client, "_channel", return_value=channel):
                     if ignore_write:
                         with self.assertRaises(p.ProtocolError):
@@ -350,6 +381,9 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
         channel.__aenter__.return_value = channel
         channel.discover.side_effect = TimeoutError()
         channel.diagnostics = {"stage": "discovery", "received": 0}
+        channel.object_id = None
+        channel.properties = {}
+        channel.writable = frozenset()
         info = p.ModuleInfo("1.0.1", 0, "fake")
         with patch.object(p, "get_info", new=AsyncMock(return_value=info)), patch.object(client, "_channel", return_value=channel):
             state = await client.update()
@@ -357,6 +391,110 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.udp_status, "no_response")
         self.assertFalse(state.power_controllable)
         self.assertEqual(state.udp_diagnostics["stage"], "discovery")
+
+    async def test_reply_for_different_controller_object_is_ignored(self):
+        channel, fake = await self.channel(wrong_destination=True)
+        channel.source = p.CONTROLLER
+        async with channel:
+            with self.assertRaises(TimeoutError):
+                await channel.request(p.NODE, {0xD6: b""})
+        self.assertEqual(channel.diagnostics["unmatched_frames"], 1)
+
+
+class TransportTests(unittest.IsolatedAsyncioTestCase):
+    async def devices(self, *, standard=None, app=None):
+        """Simulate fixed-port Sharp replies on a different loopback address."""
+        fakes = []
+        for port, source, options in ((3610, p.CONTROLLER, standard or {}),
+                                     (8766, p.SOURCE, app or {})):
+            fake = FakePurifier(source=source, reply_port=port, **options)
+            transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
+                lambda fake=fake: fake, local_addr=("127.0.0.2", port))
+            self.addCleanup(transport.close)
+            fakes.append(fake)
+        client = p.SharpLocalClient("127.0.0.2", bind_ip="127.0.0.1")
+        info = p.ModuleInfo("1.0.4", 2, "fake")
+        return client, fakes, info
+
+    async def test_standard_channel_reads_and_controls_with_fixed_reply_port(self):
+        client, (standard, app), info = await self.devices(app={"empty_all_readings": True})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertTrue(state.power_controllable)
+        self.assertEqual((state.udp_port, state.source_object), (3610, p.CONTROLLER))
+        self.assertEqual(state.object_id, bytes.fromhex("013502"))
+        self.assertEqual(p.decode_readings(state.properties)["power"], "on")
+        self.assertEqual(state.udp_diagnostics["selected_port"], 3610)
+        self.assertFalse(app.received)
+        self.assertEqual(standard.received[0].properties, {0xD6: b""})
+        self.assertFalse(any(0xFC in frame.properties for frame in standard.received))
+        await client.set_power(False)
+        self.assertEqual(standard.power, b"\x31")
+        self.assertTrue(all(frame.source == p.CONTROLLER for frame in standard.received))
+        self.assertEqual(sum(frame.esv == 0x61 for frame in standard.received), 1)
+
+    async def test_app_fallback_write_stays_on_the_transport_that_read_state(self):
+        client, (standard, app), info = await self.devices(standard={"empty_all_readings": True})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertTrue(state.power_controllable)
+        self.assertEqual((state.udp_port, state.source_object), (8766, p.SOURCE))
+        self.assertEqual([item["port"] for item in state.udp_diagnostics["transports"]], [3610, 8766])
+        await client.set_power(False)
+        self.assertEqual(app.power, b"\x31")
+        self.assertFalse(any(frame.esv == 0x61 for frame in standard.received))
+        self.assertEqual(sum(frame.esv == 0x61 for frame in app.received), 1)
+
+    async def test_maps_from_app_do_not_enable_writes_on_read_only_standard_channel(self):
+        client, (standard, app), info = await self.devices(
+            standard={"writable": False}, app={"empty_all_readings": True})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.udp_port, 3610)
+        self.assertEqual(state.udp_status, "read_only")
+        self.assertFalse(state.power_controllable)
+        with self.assertRaises(p.ProtocolError):
+            await client.set_power(False)
+        self.assertTrue(app.received)
+        self.assertFalse(any(frame.esv == 0x61 for fake in (standard, app) for frame in fake.received))
+
+    async def test_both_channels_reject_state_without_exposing_controls(self):
+        client, fakes, info = await self.devices(
+            standard={"empty_all_readings": True}, app={"empty_all_readings": True})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.udp_status, "no_readings")
+        self.assertEqual(state.properties, {})
+        self.assertIsNone(state.udp_port)
+        self.assertFalse(state.power_controllable)
+        evidence = state.udp_diagnostics["transports"]
+        self.assertEqual([item["status"] for item in evidence], ["no_readings", "no_readings"])
+        for item in evidence:
+            singles = [entry for entry in item["responses"] if entry["requested_codes"] == ["80"]]
+            self.assertEqual(singles[0]["esv"], "52")
+        self.assertFalse(any(frame.esv == 0x61 for fake in fakes for frame in fake.received))
+
+    async def test_probe_budget_keeps_completed_power_read(self):
+        client, (standard, _), info = await self.devices(
+            standard={"partial_batch": True, "drop_read_codes": (0x84, 0xF1)})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)), \
+                patch.object(p, "UDP_PROBE_TIMEOUT", 0.1):
+            state = await client.update(broadcast=None)
+        self.assertTrue(state.power_controllable)
+        self.assertEqual(state.properties, {0x80: b"\x30"})
+        self.assertTrue(state.udp_diagnostics["probe_timeout"])
+        # The fixed receive port is released after cancellation.
+        await client.set_power(False)
+        self.assertEqual(standard.power, b"\x31")
+
+    async def test_concurrent_clients_serialize_the_fixed_receive_port(self):
+        first, (standard, _), info = await self.devices()
+        second = p.SharpLocalClient("127.0.0.2", bind_ip="127.0.0.1")
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            states = await asyncio.gather(first.update(broadcast=None), second.update(broadcast=None))
+        self.assertTrue(all(state.power_controllable for state in states))
+        self.assertTrue(all(state.udp_port == 3610 for state in states))
+        self.assertEqual(len([frame for frame in standard.received if frame.destination == p.NODE]), 2)
 
 
 if __name__ == "__main__":

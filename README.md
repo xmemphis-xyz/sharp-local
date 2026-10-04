@@ -10,21 +10,26 @@ KI-TX100EU answered TCP 8765 from another subnet. The official app's handshake,
 HMAC-signed `get_info` response and module firmware `1.0.1` were verified on the
 physical device. Module firmware `1.0.4` has since been reported. Physical
 UDP discovery, purifier identification and Get/Set maps are also confirmed.
-The device advertises power Set support but returned empty values to the
-seven-property state Get. Version 0.1.2 retries missing/empty fields separately.
-Physical state readback and power control still require verification.
+The app endpoint on UDP 8766 advertises power Set support but rejects both
+batch and individual state Gets with `Get_SNA (52)` and empty values.
+Version 0.1.3 separates this app endpoint from standard ECHONET UDP 3610.
+Physical state readback and power control on 3610 still require verification.
 
 **Full local purifier control is not yet confirmed on KI-TX100EU.** The TCP
 commands found in the APK configure the Wi-Fi module, rather than control the
 fan. This integration does not send firmware, registration, reset or unlink
 commands. Do not confuse module firmware with purifier firmware.
 
-UDP 8766 uses the app's ECHONET source object `05fe01` and discovers the actual
-purifier object. It tries unicast, broadcast and multicast discovery, then the app's five-field
-purifier identification request. Missing property maps do not prevent read-only
-state requests. A fan entity is added only if the purifier advertises writable
-power property `80` and returns a valid power state. On/off uses standard
-ECHONET SetC and requires both an acknowledgement and a matching state readback.
+The client first tries standard ECHONET UDP **3610**, with controller object
+`05ff01`, and binds local port 3610 to receive standard fixed-port replies.
+UDP 8766 with the app's source object `05fe01` is a separate fallback.
+Each endpoint discovers the actual purifier object, reads its property maps
+and requests supported state fields. Unanswered unicast discovery falls back
+to broadcast and multicast. Missing maps do not prevent read-only requests.
+A fan entity is added only if one endpoint both advertises writable power
+property `80` and returns a valid power state. Maps and readings from different
+ports are never combined to grant control. On/off uses that same port/source
+pair and requires both a SetC acknowledgement and matching state readback.
 There is no guessed TCP power command, no cloud fallback, and no local mode or
 humidification write in this release. An advertised capability still needs a
 physical-device test to confirm that it changes the requested state.
@@ -47,7 +52,9 @@ cloud terminal registrations. Use a DHCP reservation for the purifier.
 
 - Module firmware, module flags, and Local protocol diagnostic sensors.
 - Local protocol attributes show discovery method, stage, packet counters,
-  property codes, lengths, and response service codes. **Download diagnostics** exports the same evidence
+  property codes, lengths, and response service codes. `selected_port` identifies
+  the state/control endpoint; `transports` records each tested port/source pair.
+  **Download diagnostics** exports the same evidence
   without keys, module MAC, IP addresses or raw property values.
 - Refresh local connection button.
 - Power, temperature and humidity sensors appear when UDP returns these fields.
@@ -55,6 +62,9 @@ cloud terminal registrations. Use a DHCP reservation for the purifier.
 
 Polling interval: 60 seconds. Empty, malformed or missing properties stay
 unknown. Missing UDP responses do not make a successful TCP connection fail.
+Each UDP endpoint has a 20-second probe budget. Completed readings survive
+timeouts on later optional fields. Multiple entries serialize access to the
+fixed UDP reply port; conflicts with another process are reported in diagnostics.
 Under integration options, disable **Probe UDP purifier protocol** for TCP-only
 diagnostics, or set **Home Assistant local IPv4 address**. `0.0.0.0` selects the
 interface automatically. A specific bind address must exist on the HA host.
@@ -68,9 +78,9 @@ automatically.
 | Local protocol | Meaning |
 | --- | --- |
 | `not_tested` | UDP probing disabled |
-| `no_response` | UDP did not answer; routing, filtering or firmware may be involved |
+| `no_response` | UDP probe timed out; inspect per-transport evidence |
 | `port_closed` | The OS reported the UDP destination unreachable |
-| `port_in_use` | Another process uses local UDP 8766 |
+| `port_in_use` | Another process uses the tested local UDP reply port |
 | `permission_denied` | The OS blocked the UDP operation |
 | `socket_error` | Another local socket error |
 | `unsupported_response` | Response cannot be used for this purifier protocol |
@@ -78,7 +88,7 @@ automatically.
 | `read_only` | Valid readings without confirmed writable power support |
 | `power_control_available` | Device advertises writable power; physical test still required |
 
-Between VLANs, allow HA ↔ purifier TCP 8765 and UDP 8766 (including replies).
+Between VLANs, allow HA ↔ purifier TCP 8765 and UDP **3610 and 8766** (including replies).
 Broadcast normally stays in one subnet. A TCP handshake proves TCP connectivity,
 not UDP reachability or full local control. The initial unicast probe works
 across routed subnets; broadcast/multicast fallbacks are most useful when HA
@@ -124,10 +134,14 @@ python3 -m compileall -q custom_components tools tests
 ```
 
 Tests exercise fragmented TCP frames, signatures, ECHONET parsing, capability
-gating and UDP request/acknowledgement handling against local fake devices.
+gating, fixed-port UDP replies, transport selection, concurrent clients and
+power acknowledgement/readback against local fake devices.
 They do not replace a test in Home Assistant with the physical purifier.
 
 Protocol references: Sharp Life AIR EU APK 1.0.4 (`r5.a`, `r5.b`, `r5.g`),
-[ECHONET specifications](https://echonet.jp/spec-en/), and the Sharp F1 field
+[ECHONET Lite v1.14 Part 2](https://echonet.jp/spec_v114_lite_en/)
+(section 1.2 specifies UDP destination 3610 for requests and responses),
+[sharp-echonet](https://www.npmjs.com/package/sharp-echonet)
+(a primary implementation using 3610 and controller `05ff01` on KI-UX75;
+that model's success does not establish KI-TX100EU support), and the Sharp F1 field
 mapping documented by [aiosharp-cocoro-air](https://github.com/rsokolowski/aiosharp-cocoro-air).
-

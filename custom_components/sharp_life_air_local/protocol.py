@@ -1,8 +1,9 @@
 """Sharp local protocol, independent of Home Assistant and cloud services.
 
 TCP 8765 get_info and UDP 8766 discovery follow Sharp Life AIR EU 1.0.4.
-UDP power control uses ECHONET SetC only after the device advertises EPC 80
-in its Set property map. Availability on KI-TX100EU remains unverified.
+State/control first use standard ECHONET UDP 3610 and controller 05ff01.
+The app transport is a separate fallback. A write requires a valid power read
+and Set map from the same transport. KI-TX100EU control remains unverified.
 """
 from __future__ import annotations
 
@@ -12,14 +13,19 @@ import hashlib
 import hmac
 import secrets
 import socket
+from weakref import WeakKeyDictionary
 from contextlib import suppress
 from dataclasses import dataclass, field
 
 TCP_PORT = 8765
 UDP_PORT = 8766
+ECHONET_PORT = 3610
+UDP_PROBE_TIMEOUT = 20
 MULTICAST = "224.0.23.0"
 SOURCE = bytes.fromhex("05fe01")
+CONTROLLER = bytes.fromhex("05ff01")
 NODE = bytes.fromhex("0ef001")
+_PORT_LOCKS = WeakKeyDictionary()
 _KEY_DATA = (
     "535d0d560600075a0d510155030a5e07570f0b0a0f54025356550252520b00005d"
     "045808090c030052505354075704530707000001015651075602500402543d"
@@ -66,10 +72,13 @@ class LocalState:
     properties: dict[int, bytes] = field(default_factory=dict, repr=False)
     set_map: frozenset[int] = frozenset()
     udp_diagnostics: dict = field(default_factory=dict)
+    udp_port: int | None = None
+    source_object: bytes | None = None
 
     @property
     def power_controllable(self) -> bool:
-        return (self.object_id is not None and 0x80 in self.set_map
+        return (self.object_id is not None and self.udp_port is not None
+                and self.source_object is not None and 0x80 in self.set_map
                 and self.properties.get(0x80) in (b"\x30", b"\x31"))
 
 
@@ -114,10 +123,11 @@ async def get_info(host: str, port: int = TCP_PORT, timeout: float = 10) -> Modu
                 await writer.wait_closed()
 
 
-def encode_frame(tid: int, destination: bytes, esv: int, properties: dict[int, bytes]) -> bytes:
-    if len(destination) != 3 or not 0 < len(properties) <= 255:
+def encode_frame(tid: int, destination: bytes, esv: int, properties: dict[int, bytes],
+                 *, source: bytes = SOURCE) -> bytes:
+    if len(source) != 3 or len(destination) != 3 or not 0 < len(properties) <= 255:
         raise ProtocolError("Invalid ECHONET request")
-    frame = bytearray(b"\x10\x81" + tid.to_bytes(2, "big") + SOURCE + destination)
+    frame = bytearray(b"\x10\x81" + tid.to_bytes(2, "big") + source + destination)
     frame.extend((esv, len(properties)))
     for code, value in properties.items():
         if len(value) > 255:
@@ -187,6 +197,11 @@ class _Receiver(asyncio.DatagramProtocol):
     def __init__(self, host: str):
         self.host = host
         self.queue = asyncio.Queue(maxsize=32)
+        self.closed = asyncio.get_running_loop().create_future()
+
+    def connection_lost(self, error):
+        if not self.closed.done():
+            self.closed.set_result(None)
 
     def datagram_received(self, data, address):
         if address[0] == self.host and not self.queue.full():
@@ -200,37 +215,68 @@ class _Receiver(asyncio.DatagramProtocol):
 class EchonetChannel:
     """Short-lived UDP socket; validate peer, transaction and object IDs."""
 
-    def __init__(self, host: str, *, port=UDP_PORT, bind_ip="0.0.0.0", bind_port=UDP_PORT, timeout=2):
+    def __init__(self, host: str, *, port=UDP_PORT, source=SOURCE,
+                 bind_ip="0.0.0.0", bind_port=None, timeout=2):
         self.host = host
         self.port = port
         self.bind_ip = bind_ip
-        self.bind_port = bind_port
+        self.bind_port = port if bind_port is None else bind_port
+        self.source = source
         self.timeout = timeout
         self.transport = None
         self.receiver = None
+        self.port_lock = None
+        self.object_id = None
+        self.writable = frozenset()
+        self.properties = {}
         self.tid = secrets.randbelow(65536)
-        self.diagnostics = {"stage": "socket", "sent": 0, "received": 0,
+        self.diagnostics = {"stage": "socket", "port": port,
+                            "source_object": source.hex(), "bind_port": self.bind_port,
+                            "sent": 0, "received": 0,
                             "invalid_frames": 0, "unmatched_frames": 0}
 
     async def __aenter__(self):
         loop = asyncio.get_running_loop()
-        self.transport, self.receiver = await loop.create_datagram_endpoint(
-            lambda: _Receiver(self.host), local_addr=(self.bind_ip, self.bind_port),
-            family=socket.AF_INET,
-        )
-        self.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        if self.bind_ip != "0.0.0.0":
-            self.transport.get_extra_info("socket").setsockopt(
-                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.bind_ip)
+        if self.bind_port:
+            # Fixed reply ports cannot be shared by independent sockets.
+            # Serialize this integration's clients; report external conflicts.
+            locks = _PORT_LOCKS.setdefault(loop, {})
+            port_lock = locks.setdefault(self.bind_port, asyncio.Lock())
+            self.diagnostics["stage"] = "waiting_for_port"
+            await port_lock.acquire()
+            self.port_lock = port_lock
+        self.diagnostics["stage"] = "socket"
+        try:
+            self.transport, self.receiver = await loop.create_datagram_endpoint(
+                lambda: _Receiver(self.host), local_addr=(self.bind_ip, self.bind_port),
+                family=socket.AF_INET,
             )
+            self.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            if self.bind_ip != "0.0.0.0":
+                self.transport.get_extra_info("socket").setsockopt(
+                    socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.bind_ip)
+                )
+        except BaseException:
+            await self._close()
+            raise
         return self
 
     async def __aexit__(self, *args):
-        self.transport.close()
+        await self._close()
+
+    async def _close(self):
+        try:
+            if self.transport is not None:
+                self.transport.close()
+                await self.receiver.closed
+        finally:
+            if self.port_lock is not None:
+                self.port_lock.release()
+                self.port_lock = None
 
     async def request(self, destination, properties, *, esv=0x62, target=None, attempts=1):
         self.tid = (self.tid + 1) & 0xFFFF
-        request = encode_frame(self.tid, destination, esv, properties)
+        request = encode_frame(self.tid, destination, esv, properties, source=self.source)
         loop = asyncio.get_running_loop()
         for _ in range(attempts):
             self.transport.sendto(request, (target or self.host, self.port))
@@ -251,7 +297,7 @@ class EchonetChannel:
                     continue
                 expected = (0x72, 0x52) if esv == 0x62 else (0x71, 0x51)
                 if (frame.tid != self.tid or frame.source != destination
-                        or frame.destination != SOURCE or frame.esv not in expected
+                        or frame.destination != self.source or frame.esv not in expected
                         or not set(properties).intersection(frame.properties)):
                     self.diagnostics["unmatched_frames"] += 1
                     continue
@@ -283,7 +329,8 @@ class EchonetChannel:
             self.diagnostics["stage"] = "discovery"
             self.diagnostics["discovery_method"] = method
             try:
-                profile = await self.request(NODE, {0xD6: b"", 0x8C: b""},
+                discovery_codes = (0xD6, 0x8C) if self.source == SOURCE else (0xD6,)
+                profile = await self.request(NODE, {code: b"" for code in discovery_codes},
                                              target=target, attempts=2)
                 break
             except TimeoutError:
@@ -298,17 +345,21 @@ class EchonetChannel:
         if len(candidates) != 1:
             raise ProtocolError("Expected exactly one air purifier object")
         object_id = candidates[0]
+        self.object_id = object_id
         self.diagnostics["object_id"] = object_id.hex()
-        self.diagnostics["stage"] = "identification"
-        try:
-            identity = await self.request(object_id, {
-                code: b"" for code in (0x8A, 0x8C, 0xF0, 0xFC, 0xFD)
-            })
-            self.diagnostics["identification_lengths"] = {
-                f"{code:02X}": len(value) for code, value in identity.items()
-            }
-        except TimeoutError:
-            self.diagnostics["identification_timeout"] = True
+        # Vendor identification belongs to the official app's discovery
+        # endpoint. Standard ECHONET needs only the instance list and maps.
+        if self.source == SOURCE:
+            self.diagnostics["stage"] = "identification"
+            try:
+                identity = await self.request(object_id, {
+                    code: b"" for code in (0x8A, 0x8C, 0xF0, 0xFC, 0xFD)
+                })
+                self.diagnostics["identification_lengths"] = {
+                    f"{code:02X}": len(value) for code, value in identity.items()
+                }
+            except TimeoutError:
+                self.diagnostics["identification_timeout"] = True
         self.diagnostics["stage"] = "property_maps"
         # A missing map must not hide otherwise readable purifier data.
         maps = {}
@@ -323,15 +374,17 @@ class EchonetChannel:
                 except TimeoutError:
                     self.diagnostics.setdefault("missing_maps", []).append(f"{code:02X}")
         writable = property_map(maps.get(0x9E, b""))
+        self.writable = writable
         readable = property_map(maps.get(0x9F, b""))
         self.diagnostics["writable_codes"] = [f"{code:02X}" for code in sorted(writable)]
         self.diagnostics["readable_codes"] = [f"{code:02X}" for code in sorted(readable)]
         codes = [code for code in READ_CODES if not readable or code in readable]
         self.diagnostics["stage"] = "readings"
         readings = {}
+        self.properties = readings
         if codes:
             try:
-                readings = await self.request(object_id, {code: b"" for code in codes})
+                readings.update(await self.request(object_id, {code: b"" for code in codes}))
             except TimeoutError:
                 self.diagnostics["readings_timeout"] = True
             self.diagnostics["batch_property_lengths"] = {
@@ -358,7 +411,7 @@ class EchonetChannel:
 
 
 class SharpLocalClient:
-    def __init__(self, host: str, *, tcp_port=TCP_PORT, bind_ip="0.0.0.0", bind_port=UDP_PORT):
+    def __init__(self, host: str, *, tcp_port=TCP_PORT, bind_ip="0.0.0.0", bind_port=None):
         self.host = host
         self.tcp_port = tcp_port
         self.bind_ip = bind_ip
@@ -366,42 +419,69 @@ class SharpLocalClient:
         self.lock = asyncio.Lock()
         self.state = None
 
-    def _channel(self):
-        return EchonetChannel(self.host, bind_ip=self.bind_ip, bind_port=self.bind_port)
+    def _channel(self, *, port=ECHONET_PORT, source=CONTROLLER):
+        return EchonetChannel(self.host, port=port, source=source,
+                              bind_ip=self.bind_ip, bind_port=self.bind_port)
+
+    async def _probe(self, module, port, source, broadcast):
+        channel = self._channel(port=port, source=source)
+        status = "no_readings"
+        budget = asyncio.timeout(UDP_PROBE_TIMEOUT)
+        try:
+            async with budget, channel:
+                await channel.discover(broadcast=broadcast)
+        except TimeoutError:
+            status = "no_response"
+            if budget.expired():
+                channel.diagnostics["probe_timeout"] = True
+        except ProtocolError:
+            status = "unsupported_response"
+        except OSError as err:
+            status = {
+                errno.EPERM: "permission_denied", errno.EACCES: "permission_denied",
+                errno.EADDRINUSE: "port_in_use", errno.ECONNREFUSED: "port_closed",
+            }.get(err.errno, "socket_error")
+        # Keep completed reads if a later optional field exhausts the budget.
+        # Maps and values always belong to this one port/source pair.
+        readings = {code: value for code, value in channel.properties.items() if value}
+        if readings:
+            status = ("power_control_available" if 0x80 in channel.writable
+                      and readings.get(0x80) in (b"\x30", b"\x31") else "read_only")
+        channel.diagnostics["status"] = status
+        return LocalState(module, status, channel.object_id, readings, channel.writable,
+                          dict(channel.diagnostics), port if readings else None,
+                          source if readings else None)
 
     async def update(self, *, udp=True, broadcast="255.255.255.255") -> LocalState:
         async with self.lock:
             module = await get_info(self.host, self.tcp_port)
-            object_id, writable, readings = None, frozenset(), {}
-            status = "not_tested"
-            diagnostics = {}
-            if udp:
-                channel = self._channel()
-                try:
-                    async with channel:
-                        object_id, writable, readings = await channel.discover(broadcast=broadcast)
-                    status = ("power_control_available" if 0x80 in writable
-                              and readings.get(0x80) in (b"\x30", b"\x31")
-                              else "read_only" if readings else "no_readings")
-                except TimeoutError:
-                    status = "no_response"
-                except ProtocolError:
-                    status = "unsupported_response"
-                except OSError as err:
-                    status = {
-                        errno.EPERM: "permission_denied", errno.EACCES: "permission_denied",
-                        errno.EADDRINUSE: "port_in_use", errno.ECONNREFUSED: "port_closed",
-                    }.get(err.errno, "socket_error")
-                finally:
-                    diagnostics = dict(channel.diagnostics)
-            self.state = LocalState(module, status, object_id, readings, writable, diagnostics)
+            if not udp:
+                self.state = LocalState(module, "not_tested")
+                return self.state
+            candidates = []
+            for port, source in ((ECHONET_PORT, CONTROLLER), (UDP_PORT, SOURCE)):
+                candidate = await self._probe(module, port, source, broadcast)
+                candidates.append(candidate)
+                if candidate.power_controllable:
+                    break
+            # Prefer usable state; retain app metadata when neither can read.
+            selected = max(candidates, key=lambda item: (
+                item.power_controllable, len(decode_readings(item.properties)),
+                bool(item.properties), item.object_id is not None,
+            ))
+            evidence = dict(selected.udp_diagnostics)
+            evidence["selected_port"] = selected.udp_port
+            evidence["transports"] = [item.udp_diagnostics for item in candidates]
+            self.state = LocalState(module, selected.udp_status, selected.object_id,
+                                    selected.properties, selected.set_map, evidence,
+                                    selected.udp_port, selected.source_object)
             return self.state
 
     async def set_power(self, on: bool):
         async with self.lock:
             if self.state is None or not self.state.power_controllable:
                 raise ProtocolError("Local power control has not been advertised by this device")
-            async with self._channel() as channel:
+            async with self._channel(port=self.state.udp_port, source=self.state.source_object) as channel:
                 await channel.request(self.state.object_id, {0x80: b"\x30" if on else b"\x31"}, esv=0x61)
                 expected = b"\x30" if on else b"\x31"
                 for attempt in range(3):
