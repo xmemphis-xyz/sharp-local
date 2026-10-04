@@ -64,7 +64,7 @@ The two uploaded 0.1.3 diagnostics have identical results: six discovery
 requests on 3610/05ff01 receive zero frames; eleven exchanges on 8766/05fe01
 confirm metadata and reject state. This does not prove that port 3610 is closed.
 
-Version 0.1.4 adds one controlled, unverified comparison: send a single Get 80
+Version 0.1.4 adds one controlled comparison: send a single Get 80
 to the air-cleaner EOJ confirmed by app discovery, on port 8766 with controller
 source 05ff01. This isolates source-object selection without changing the
 responding endpoint or guessing an instance. If power is neither 30 nor 31,
@@ -106,19 +106,43 @@ state cannot be confirmed. It never retries the Set command automatically.
 Physical KI-TX100EU app discovery reports EOJ 013501. Its Set map advertises
 80, 81, A0, F3, F4. Module firmware is currently reported as 1.0.4 and flags
 as 0x0002; no interpretation of those flag bits has been verified.
-3610 discovery receives no responses in the current configuration. Physical
-8766/05ff01 power reads and control still require device validation.
+Physical 0.1.4 diagnostics record the following results:
+
+| Destination port / source EOJ | Requests / accepted replies | Result |
+| --- | --- | --- |
+| 3610 / 05ff01 | 6 / 0 | No replies to unicast, broadcast or multicast discovery |
+| 8766 / 05fe01 | 11 / 11 | Identification and maps succeed; batch and individual state Gets return empty Get_SNA (52) |
+| 8766 / 05ff01 | 1 / 1 | Power Get 80 returns empty Get_SNA (52) |
+
+Both tested source objects receive valid replies on 8766, but neither returns
+the requested power value. The controller-source comparison therefore did not
+enable local state reads. `selected_port` and `selected_source_object` remain
+null, `power_controllable` is false, and no Set request was sent. These results
+establish neither that 3610 is closed nor that all possible local protocols are
+unsupported. They do not identify whether firmware, registration state or
+another device condition accounts for the rejected reads.
+
 TCP succeeded across VLANs. UDP 8766 was open|filtered from diomedes; the
 same-subnet Termux tests failed at sendto with EPERM and therefore cannot
 establish whether the purifier answers same-subnet discovery.
 
 ## Next evidence needed
 
-Update HACS and restart HA, then use Refresh local connection and Download
-diagnostics. Inspect the 8766/05ff01 power probe, `selected_port` and
-`selected_source_object`. The standalone
-probe can provide the same read-only evidence from a host on the purifier LAN.
+The source comparison is complete; repeating the same probe in unchanged
+conditions does not resolve the remaining protocol gap. The physical fan state
+and current registration status were not recorded alongside these diagnostics.
+Record that context before comparing a read under a different device condition.
+
+Further implementation needs a valid state exchange on this exact model and
+firmware, or primary protocol/mode documentation that explains how to obtain one.
+The KI-TX100EU manual's Wi-Fi settings do not document an ECHONET or HEMS mode.
+Mode-switch instructions for older Sharp wireless adapters are not evidence
+for this built-in module. Static inspection of the supplied EU app APK 1.0.4
+found discovery/identification UDP calls and the TCP module commands listed
+above, but no local purifier power request; that observation alone does not
+prove the firmware lacks another local control path.
+
 If valid power state and Set support are returned, test conditional power
-off/on in HA and compare with the physical device. Local
-modes and humidification require further protocol evidence before adding
-writes; neither is inferred from TCP get_info or module flags.
+off/on in HA and compare with the physical device. Local modes and
+humidification require further protocol evidence before adding writes;
+neither is inferred from TCP get_info or module flags.
