@@ -1,4 +1,5 @@
 """Constants."""
 DOMAIN = "sharp_life_air_local"
 CONF_BIND_IP = "bind_ip"
+CONF_BROADCAST = "broadcast"
 CONF_TEST_UDP = "test_udp"

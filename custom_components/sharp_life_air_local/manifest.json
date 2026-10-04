@@ -1,11 +1,13 @@
 {
   "domain": "sharp_life_air_local",
   "name": "Sharp Life AIR Local",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "config_flow": true,
   "documentation": "https://github.com/xmemphis-xyz/sharp-local",
   "issue_tracker": "https://github.com/xmemphis-xyz/sharp-local/issues",
-  "codeowners": ["@xmemphis-xyz"],
+  "codeowners": [
+    "@xmemphis-xyz"
+  ],
   "requirements": [],
   "iot_class": "local_polling",
   "integration_type": "device"

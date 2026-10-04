@@ -16,9 +16,11 @@ fan. This integration does not send firmware, registration, reset or unlink
 commands. Do not confuse module firmware with purifier firmware.
 
 UDP 8766 uses the app's ECHONET source object `05fe01` and discovers the actual
-purifier object. It reads the Get and Set property maps. A fan entity is added
-only if the purifier advertises writable power property `80`. Pressing its
-on/off control then uses standard ECHONET SetC and requires an acknowledgement.
+purifier object. It tries unicast, broadcast and multicast discovery, then the app's five-field
+purifier identification request. Missing property maps do not prevent read-only
+state requests. A fan entity is added only if the purifier advertises writable
+power property `80` and returns a valid power state. On/off uses standard
+ECHONET SetC and requires both an acknowledgement and a matching state readback.
 There is no guessed TCP power command, no cloud fallback, and no local mode or
 humidification write in this release. An advertised capability still needs a
 physical-device test to confirm that it changes the requested state.
@@ -29,7 +31,7 @@ HACS → three-dot menu → **Custom repositories** →
 `https://github.com/xmemphis-xyz/sharp-local` → **Integration**.
 Download **Sharp Life AIR Local**, restart Home Assistant, then
 **Settings → Devices & services → Add Integration → Sharp Life AIR Local**.
-Enter the purifier IP address, for example `192.168.2.243`.
+Enter the purifier IP address, for example `192.168.1.32`.
 
 Manual alternative: extract the release ZIP into `/config`, so the component
 is `/config/custom_components/sharp_life_air_local`, and restart HA.
@@ -40,6 +42,9 @@ cloud terminal registrations. Use a DHCP reservation for the purifier.
 ## Entities and options
 
 - Module firmware, module flags, and Local protocol diagnostic sensors.
+- Local protocol attributes show discovery method, stage, packet counters,
+  property codes and lengths. **Download diagnostics** exports the same evidence
+  without keys, module MAC, IP addresses or raw property values.
 - Refresh local connection button.
 - Power, temperature and humidity sensors appear when UDP returns these fields.
 - Air purifier fan on/off appears only after confirmed Set-map support.
@@ -50,6 +55,12 @@ Under integration options, disable **Probe UDP purifier protocol** for TCP-only
 diagnostics, or set **Home Assistant local IPv4 address**. `0.0.0.0` selects the
 interface automatically. A specific bind address must exist on the HA host.
 
+**UDP discovery broadcast address** defaults to `255.255.255.255`. When HA and
+the purifier share a subnet, you can set its directed broadcast address, e.g.
+`192.168.1.255` for `192.168.1.0/24`. Leave it empty to disable broadcast.
+Multicast fallback uses the app's `224.0.23.0` group. Neither crosses VLANs
+automatically.
+
 | Local protocol | Meaning |
 | --- | --- |
 | `not_tested` | UDP probing disabled |
@@ -59,14 +70,15 @@ interface automatically. A specific bind address must exist on the HA host.
 | `permission_denied` | The OS blocked the UDP operation |
 | `socket_error` | Another local socket error |
 | `unsupported_response` | Response cannot be used for this purifier protocol |
-| `read_only` | Valid purifier response without writable power support |
+| `no_readings` | Object discovered, but no requested state values returned |
+| `read_only` | Valid readings without confirmed writable power support |
 | `power_control_available` | Device advertises writable power; physical test still required |
 
 Between VLANs, allow HA ↔ purifier TCP 8765 and UDP 8766 (including replies).
 Broadcast normally stays in one subnet. A TCP handshake proves TCP connectivity,
-not UDP reachability or full local control. Multicast/broadcast forwarding is
-not required for the integration's unicast probe, but some firmware may only
-answer discovery on the same subnet.
+not UDP reachability or full local control. The initial unicast probe works
+across routed subnets; broadcast/multicast fallbacks are most useful when HA
+and the purifier are on the same subnet.
 
 ## Standalone read-only probe
 
@@ -76,21 +88,21 @@ Python 3.12 or newer; no pip packages needed. On diomedes, as root:
 cd /opt
 git clone https://github.com/xmemphis-xyz/sharp-local.git
 cd /opt/sharp-local
-python3 tools/probe_local.py 192.168.2.243
+python3 tools/probe_local.py 192.168.1.32
 ```
 
 If already cloned, use `git pull --ff-only` from `/opt/sharp-local`.
 TCP-only test:
 
 ```bash
-python3 tools/probe_local.py 192.168.2.243 --tcp-only
+python3 tools/probe_local.py 192.168.1.32 --tcp-only
 ```
 
 On a machine actually connected to the purifier subnet, a directed broadcast
-can also be tested. Example for a /24 network and phone address `192.168.2.157`:
+can also be tested. Example for a /24 network and HA host address `192.168.1.7`:
 
 ```bash
-python tools/probe_local.py 192.168.2.243 --bind-ip 192.168.2.157 --broadcast 192.168.2.255
+python3 tools/probe_local.py 192.168.1.32 --bind-ip 192.168.1.7 --broadcast 192.168.1.255
 ```
 
 Do not bind diomedes to the phone's address. An Android `permission_denied`
@@ -114,3 +126,4 @@ They do not replace a test in Home Assistant with the physical purifier.
 Protocol references: Sharp Life AIR EU APK 1.0.4 (`r5.a`, `r5.b`, `r5.g`),
 [ECHONET specifications](https://echonet.jp/spec-en/), and the Sharp F1 field
 mapping documented by [aiosharp-cocoro-air](https://github.com/rsokolowski/aiosharp-cocoro-air).
+

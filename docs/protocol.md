@@ -34,16 +34,21 @@ Get `62`, properties D6 and 8C. Exact transaction-1 frame:
 ```
 
 The response D6 supplies the actual purifier EOJ (class `0135`), so do not
-assume instance `01`. The APK then requests manufacturer/product/base-info
-properties. This client instead reads standard maps 9E/9F and supported state
-fields. Those additional reads and a conditional SetC 80 are standards-based
+assume instance `01`. The APK then requests 8A, 8C, F0, FC and FD from the discovered
+purifier object. This client follows that identification read before reading
+standard maps 9E/9F and supported state fields. Unanswered unicast discovery
+falls back to configurable broadcast and the APK multicast group 224.0.23.0.
+Missing maps do not gate read-only state reads; a missing Set map still prevents
+power writes. Partial Get_SNA replies preserve the supported property values. Those additional reads and a conditional SetC 80 are standards-based
 extensions; they have not been confirmed against KI-TX100EU firmware.
 
 Power: SetC `61`, property 80 value 30=on or 31=off. Require Set_Res `71` with
 the matching transaction, objects and property. A Set_SNA `51`, no response,
 or malformed response is an error. Never retry a write automatically. A Set
 acknowledgement does not by itself prove that the physical state has changed;
-read the state again and compare with the purifier.
+read the state again and compare with the purifier. This client checks power
+readback up to three times after one Set command, and raises if the requested
+state cannot be confirmed. It never retries the Set command automatically.
 
 No UDP discovery response has yet been demonstrated on the physical device.
 TCP succeeded across VLANs. UDP 8766 was open|filtered from diomedes; the
@@ -57,3 +62,4 @@ purifier subnet. Record its safe output. If UDP answers, test conditional
 power off/on in HA and compare the state sensor and physical device. Local
 modes and humidification require further protocol evidence before adding
 writes; neither is inferred from TCP get_info or module flags.
+

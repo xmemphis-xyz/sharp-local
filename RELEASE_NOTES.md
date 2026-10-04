@@ -1,13 +1,11 @@
-First experimental Sharp Life AIR Local integration, with no account or cloud dependency.
+Fix discovery and state handling in the experimental local integration.
 
-TCP 8765 signed get_info has been confirmed on a physical KI-TX100EU, module firmware 1.0.1. The integration shows module diagnostics and probes the official app's UDP 8766 discovery protocol.
+UDP discovery now tries unicast, broadcast and the official multicast group, then the app's purifier identification request. Missing property maps and partial Get_SNA responses no longer hide otherwise readable data. Controls still require advertised power Set support and a valid power state. Each power command is sent once and its resulting state must be read back.
 
-Full local purifier control remains unconfirmed. A local on/off fan is exposed only if a responding purifier advertises writable power support. Modes and humidification are not implemented locally yet.
+Added the "UDP discovery broadcast address" option, Local protocol diagnostic attributes and "Download diagnostics" in HA. Diagnostics omit keys, module MAC, IP addresses and raw property values.
 
-Add https://github.com/xmemphis-xyz/sharp-local to HACS as an Integration, download, restart Home Assistant, then add Sharp Life AIR Local using the purifier IP. The cloud integration can remain enabled.
+Update Sharp Life AIR Local in HACS and restart Home Assistant. For HA 192.168.1.7 and purifier 192.168.1.32 on a /24 subnet, options may use bind IP 192.168.1.7 and directed broadcast 192.168.1.255. The default limited broadcast works without assuming a subnet mask.
 
-A standalone read-only probe is included: python3 tools/probe_local.py 192.168.2.243. It omits keys and raw packets. See README.md for details.
-
-Automated fake-device protocol tests pass. Testing inside Home Assistant and with the physical purifier is still required.
+Fake-device protocol regression tests pass. Physical-device UDP readings and power control remain unconfirmed; this release provides the corrected exchange and evidence needed for that test. Modes and humidification are not implemented locally.
 
 For manual installation, extract sharp_life_air_local.zip into /config.

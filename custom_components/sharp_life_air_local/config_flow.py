@@ -5,7 +5,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_HOST
 
-from .const import CONF_BIND_IP, CONF_TEST_UDP, DOMAIN
+from .const import CONF_BIND_IP, CONF_BROADCAST, CONF_TEST_UDP, DOMAIN
 from .protocol import ProtocolError, get_info
 
 
@@ -40,10 +40,20 @@ class SharpLocalOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             try:
                 user_input[CONF_BIND_IP] = str(ipaddress.IPv4Address(user_input[CONF_BIND_IP].strip()))
+                broadcast = user_input.get(CONF_BROADCAST, "255.255.255.255").strip()
+                if broadcast:
+                    try:
+                        broadcast = str(ipaddress.IPv4Address(broadcast))
+                    except ValueError:
+                        errors[CONF_BROADCAST] = "invalid_ip"
+                        raise
+                user_input[CONF_BROADCAST] = broadcast
                 return self.async_create_entry(title="", data=user_input)
             except ValueError:
-                errors[CONF_BIND_IP] = "invalid_ip"
+                if not errors:
+                    errors[CONF_BIND_IP] = "invalid_ip"
         return self.async_show_form(step_id="init", data_schema=vol.Schema({
             vol.Required(CONF_TEST_UDP, default=self.config_entry.options.get(CONF_TEST_UDP, True)): bool,
             vol.Required(CONF_BIND_IP, default=self.config_entry.options.get(CONF_BIND_IP, "0.0.0.0")): str,
+            vol.Optional(CONF_BROADCAST, default=self.config_entry.options.get(CONF_BROADCAST, "255.255.255.255")): str,
         }), errors=errors)

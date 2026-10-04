@@ -44,6 +44,12 @@ class SharpLocalDiagnostic(SharpLocalEntity, SensorEntity):
             return f"0x{self.coordinator.data.module.flags:04X}"
         return self.coordinator.data.module.version
 
+    @property
+    def extra_state_attributes(self):
+        if self.key == "udp_status":
+            return self.coordinator.data.udp_diagnostics
+        return None
+
 
 class SharpLocalReading(SharpLocalEntity, SensorEntity):
     def __init__(self, coordinator, key):

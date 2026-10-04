@@ -7,7 +7,7 @@ from homeassistant.const import CONF_HOST
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import CONF_BIND_IP, CONF_TEST_UDP
+from .const import CONF_BIND_IP, CONF_BROADCAST, CONF_TEST_UDP
 from .protocol import ProtocolError, SharpLocalClient, decode_readings
 
 
@@ -26,8 +26,11 @@ class SharpLocalCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         try:
-            async with asyncio.timeout(25):
-                state = await self.client.update(udp=self.entry.options.get(CONF_TEST_UDP, True))
+            async with asyncio.timeout(40):
+                state = await self.client.update(
+                    udp=self.entry.options.get(CONF_TEST_UDP, True),
+                    broadcast=self.entry.options.get(CONF_BROADCAST, "255.255.255.255") or None,
+                )
             if self.entry.unique_id and state.module.mac != self.entry.unique_id:
                 self.client.state = None
                 raise UpdateFailed("A different Sharp module is using this IP address")
@@ -42,5 +45,5 @@ class SharpLocalCoordinator(DataUpdateCoordinator):
             async with asyncio.timeout(10):
                 await self.client.set_power(on)
         except (OSError, TimeoutError, ProtocolError) as err:
-            raise HomeAssistantError("Sharp local power command was not acknowledged") from err
+            raise HomeAssistantError("Sharp local power command could not be confirmed") from err
         await self.async_request_refresh()

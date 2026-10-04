@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 TCP_PORT = 8765
 UDP_PORT = 8766
+MULTICAST = "224.0.23.0"
 SOURCE = bytes.fromhex("05fe01")
 NODE = bytes.fromhex("0ef001")
 _KEY_DATA = (
@@ -64,10 +65,12 @@ class LocalState:
     object_id: bytes | None = None
     properties: dict[int, bytes] = field(default_factory=dict, repr=False)
     set_map: frozenset[int] = frozenset()
+    udp_diagnostics: dict = field(default_factory=dict)
 
     @property
     def power_controllable(self) -> bool:
-        return self.object_id is not None and 0x80 in self.set_map
+        return (self.object_id is not None and 0x80 in self.set_map
+                and self.properties.get(0x80) in (b"\x30", b"\x31"))
 
 
 async def get_info(host: str, port: int = TCP_PORT, timeout: float = 10) -> ModuleInfo:
@@ -206,6 +209,8 @@ class EchonetChannel:
         self.transport = None
         self.receiver = None
         self.tid = secrets.randbelow(65536)
+        self.diagnostics = {"stage": "socket", "sent": 0, "received": 0,
+                            "invalid_frames": 0, "unmatched_frames": 0}
 
     async def __aenter__(self):
         loop = asyncio.get_running_loop()
@@ -214,6 +219,10 @@ class EchonetChannel:
             family=socket.AF_INET,
         )
         self.transport.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        if self.bind_ip != "0.0.0.0":
+            self.transport.get_extra_info("socket").setsockopt(
+                socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(self.bind_ip)
+            )
         return self
 
     async def __aexit__(self, *args):
@@ -225,6 +234,7 @@ class EchonetChannel:
         loop = asyncio.get_running_loop()
         for _ in range(attempts):
             self.transport.sendto(request, (target or self.host, self.port))
+            self.diagnostics["sent"] += 1
             deadline = loop.time() + self.timeout
             while loop.time() < deadline:
                 try:
@@ -233,14 +243,17 @@ class EchonetChannel:
                     break
                 if isinstance(data, OSError):
                     raise data
+                self.diagnostics["received"] += 1
                 try:
                     frame = decode_frame(data)
                 except ProtocolError:
+                    self.diagnostics["invalid_frames"] += 1
                     continue
                 expected = (0x72, 0x52) if esv == 0x62 else (0x71, 0x51)
                 if (frame.tid != self.tid or frame.source != destination
                         or frame.destination != SOURCE or frame.esv not in expected
-                        or not set(properties).issubset(frame.properties)):
+                        or not set(properties).intersection(frame.properties)):
+                    self.diagnostics["unmatched_frames"] += 1
                     continue
                 if esv == 0x61 and frame.esv != 0x71:
                     raise ProtocolError("Sharp rejected local power control")
@@ -248,8 +261,23 @@ class EchonetChannel:
         raise TimeoutError("No Sharp ECHONET response")
 
     async def discover(self, *, broadcast=None):
-        profile = await self.request(NODE, {0xD6: b"", 0x8C: b""},
-                                     target=broadcast, attempts=3)
+        # The APK sends this Get to the subnet broadcast, with multicast as
+        # fallback. Some modules ignore an otherwise identical unicast Get.
+        targets = [("unicast", self.host)]
+        if broadcast:
+            targets.append(("broadcast", broadcast))
+        targets.append(("multicast", MULTICAST))
+        for method, target in targets:
+            self.diagnostics["stage"] = "discovery"
+            self.diagnostics["discovery_method"] = method
+            try:
+                profile = await self.request(NODE, {0xD6: b"", 0x8C: b""},
+                                             target=target, attempts=2)
+                break
+            except TimeoutError:
+                continue
+        else:
+            raise TimeoutError("No Sharp object-list response")
         objects = profile.get(0xD6, b"")
         if not objects or len(objects) != 1 + objects[0] * 3:
             raise ProtocolError("Sharp returned an invalid object list")
@@ -258,11 +286,53 @@ class EchonetChannel:
         if len(candidates) != 1:
             raise ProtocolError("Expected exactly one air purifier object")
         object_id = candidates[0]
-        maps = await self.request(object_id, {0x9E: b"", 0x9F: b""})
+        self.diagnostics["object_id"] = object_id.hex()
+        self.diagnostics["stage"] = "identification"
+        try:
+            identity = await self.request(object_id, {
+                code: b"" for code in (0x8A, 0x8C, 0xF0, 0xFC, 0xFD)
+            })
+            self.diagnostics["identification_lengths"] = {
+                f"{code:02X}": len(value) for code, value in identity.items()
+            }
+        except TimeoutError:
+            self.diagnostics["identification_timeout"] = True
+        self.diagnostics["stage"] = "property_maps"
+        # A missing map must not hide otherwise readable purifier data.
+        maps = {}
+        try:
+            maps = await self.request(object_id, {0x9E: b"", 0x9F: b""})
+        except TimeoutError:
+            self.diagnostics["map_timeout"] = True
+        for code in (0x9E, 0x9F):
+            if code not in maps:
+                try:
+                    maps.update(await self.request(object_id, {code: b""}))
+                except TimeoutError:
+                    self.diagnostics.setdefault("missing_maps", []).append(f"{code:02X}")
         writable = property_map(maps.get(0x9E, b""))
         readable = property_map(maps.get(0x9F, b""))
+        self.diagnostics["writable_codes"] = [f"{code:02X}" for code in sorted(writable)]
+        self.diagnostics["readable_codes"] = [f"{code:02X}" for code in sorted(readable)]
         codes = [code for code in READ_CODES if not readable or code in readable]
-        readings = await self.request(object_id, {code: b"" for code in codes}) if codes else {}
+        self.diagnostics["stage"] = "readings"
+        readings = {}
+        if codes:
+            try:
+                readings = await self.request(object_id, {code: b"" for code in codes})
+            except TimeoutError:
+                # Older adapters can drop a mixed Get containing unsupported
+                # fields. Read the standard power field by itself in that case.
+                self.diagnostics["readings_timeout"] = True
+                if 0x80 in codes:
+                    try:
+                        readings = await self.request(object_id, {0x80: b""})
+                    except TimeoutError:
+                        pass
+        self.diagnostics["property_lengths"] = {
+            f"{code:02X}": len(value) for code, value in readings.items()
+        }
+        self.diagnostics["stage"] = "complete"
         return object_id, writable, {code: value for code, value in readings.items() if value}
 
 
@@ -278,16 +348,20 @@ class SharpLocalClient:
     def _channel(self):
         return EchonetChannel(self.host, bind_ip=self.bind_ip, bind_port=self.bind_port)
 
-    async def update(self, *, udp=True, broadcast=None) -> LocalState:
+    async def update(self, *, udp=True, broadcast="255.255.255.255") -> LocalState:
         async with self.lock:
             module = await get_info(self.host, self.tcp_port)
             object_id, writable, readings = None, frozenset(), {}
             status = "not_tested"
+            diagnostics = {}
             if udp:
+                channel = self._channel()
                 try:
-                    async with self._channel() as channel:
+                    async with channel:
                         object_id, writable, readings = await channel.discover(broadcast=broadcast)
-                    status = "power_control_available" if 0x80 in writable else "read_only"
+                    status = ("power_control_available" if 0x80 in writable
+                              and readings.get(0x80) in (b"\x30", b"\x31")
+                              else "read_only" if readings else "no_readings")
                 except TimeoutError:
                     status = "no_response"
                 except ProtocolError:
@@ -297,7 +371,9 @@ class SharpLocalClient:
                         errno.EPERM: "permission_denied", errno.EACCES: "permission_denied",
                         errno.EADDRINUSE: "port_in_use", errno.ECONNREFUSED: "port_closed",
                     }.get(err.errno, "socket_error")
-            self.state = LocalState(module, status, object_id, readings, writable)
+                finally:
+                    diagnostics = dict(channel.diagnostics)
+            self.state = LocalState(module, status, object_id, readings, writable, diagnostics)
             return self.state
 
     async def set_power(self, on: bool):
@@ -306,3 +382,14 @@ class SharpLocalClient:
                 raise ProtocolError("Local power control has not been advertised by this device")
             async with self._channel() as channel:
                 await channel.request(self.state.object_id, {0x80: b"\x30" if on else b"\x31"}, esv=0x61)
+                expected = b"\x30" if on else b"\x31"
+                for attempt in range(3):
+                    if attempt:
+                        await asyncio.sleep(0.5)
+                    try:
+                        power = await channel.request(self.state.object_id, {0x80: b""})
+                    except TimeoutError:
+                        continue
+                    if power.get(0x80) == expected:
+                        return
+                raise ProtocolError("Sharp acknowledged power but did not confirm the requested state")
