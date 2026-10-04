@@ -37,7 +37,8 @@ def response(request, properties, esv=0x72, *, tid=None):
 class FakePurifier(asyncio.DatagramProtocol):
     def __init__(self, *, writable=True, reject=False, wrong_first=False,
                  drop_maps=False, partial_maps=False, drop_batch=False,
-                 ignore_write=False):
+                 ignore_write=False, empty_batch_esv=None, partial_batch=False,
+                 empty_all_readings=False):
         self.writable = writable
         self.reject = reject
         self.wrong_first = wrong_first
@@ -45,6 +46,9 @@ class FakePurifier(asyncio.DatagramProtocol):
         self.partial_maps = partial_maps
         self.drop_batch = drop_batch
         self.ignore_write = ignore_write
+        self.empty_batch_esv = empty_batch_esv
+        self.partial_batch = partial_batch
+        self.empty_all_readings = empty_all_readings
         self.received = []
         self.object_id = bytes.fromhex("013502")
         self.power = b"\x30"
@@ -74,6 +78,13 @@ class FakePurifier(asyncio.DatagramProtocol):
             props = {0x9E: b"\x01\x80" if self.writable else b"\x00",
                      0x9F: b"\x03\x80\x84\xf1"}
         else:
+            if self.empty_all_readings or (self.empty_batch_esv is not None and len(request.properties) > 1):
+                props = {code: b"" for code in request.properties}
+                self.transport.sendto(response(request, props, self.empty_batch_esv or 0x52), address)
+                return
+            if self.partial_batch and len(request.properties) > 1:
+                self.transport.sendto(response(request, {0x80: self.power, 0x84: b"", 0xF1: b""}, 0x52), address)
+                return
             if self.drop_batch and len(request.properties) > 1:
                 return
             props = {0x80: self.power, 0x84: b"\x00\x09", 0xF1: b"\x00\x00\x00\x17\x2d"}
@@ -264,6 +275,44 @@ class UdpTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(writable)
         self.assertEqual(readings[0x80], b"\x30")
         self.assertEqual(channel.diagnostics["readable_codes"], ["80"])
+
+    async def test_empty_batch_triggers_individual_reads_for_get_res_and_get_sna(self):
+        for esv in (0x72, 0x52):
+            with self.subTest(esv=esv):
+                channel, fake = await self.channel(empty_batch_esv=esv)
+                async with channel:
+                    object_id, writable, readings = await channel.discover()
+                self.assertEqual(object_id, fake.object_id)
+                self.assertEqual(p.decode_readings(readings), {
+                    "power": "on", "power_watts": 9, "temperature_c": 23, "humidity_pct": 45,
+                })
+                self.assertEqual(channel.diagnostics["batch_property_lengths"], {"80": 0, "84": 0, "F1": 0})
+                self.assertEqual(channel.diagnostics["individual_read_codes"], ["80", "84", "F1"])
+                batch = channel.diagnostics["responses"][3]
+                self.assertEqual(batch["esv"], f"{esv:02X}")
+                state = p.LocalState(p.ModuleInfo("1.0.4", 2, "fake"),
+                    "power_control_available", object_id, readings, writable)
+                self.assertTrue(state.power_controllable)
+                self.assertTrue(all(frame.esv == 0x62 for frame in fake.received))
+
+    async def test_partial_batch_preserves_valid_power_and_reads_only_empty_fields(self):
+        channel, fake = await self.channel(partial_batch=True)
+        async with channel:
+            _, _, readings = await channel.discover()
+        self.assertEqual(readings[0x80], b"\x30")
+        self.assertEqual(channel.diagnostics["individual_read_codes"], ["84", "F1"])
+        self.assertEqual(p.decode_readings(readings)["humidity_pct"], 45)
+
+    async def test_still_empty_individual_reads_do_not_invent_state_or_enable_controls(self):
+        channel, fake = await self.channel(empty_all_readings=True)
+        async with channel:
+            object_id, writable, readings = await channel.discover()
+        state = p.LocalState(p.ModuleInfo("1.0.4", 2, "fake"), "no_readings",
+                             object_id, readings, writable)
+        self.assertEqual(readings, {})
+        self.assertFalse(state.power_controllable)
+        self.assertEqual(channel.diagnostics["individual_read_codes"], ["80", "84", "F1"])
+        self.assertTrue(all(frame.esv == 0x62 for frame in fake.received))
 
     async def test_power_capability_also_requires_valid_readback(self):
         for properties in ({}, {0x80: b""}, {0x80: b"\x99"}):

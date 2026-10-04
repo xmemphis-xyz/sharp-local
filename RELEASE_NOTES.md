@@ -1,11 +1,11 @@
-Fix discovery and state handling in the experimental local integration.
+Fix empty state reads from the physical KI-TX100EU.
 
-UDP discovery now tries unicast, broadcast and the official multicast group, then the app's purifier identification request. Missing property maps and partial Get_SNA responses no longer hide otherwise readable data. Controls still require advertised power Set support and a valid power state. Each power command is sent once and its resulting state must be read back.
+Diagnostics from 0.1.1 confirm UDP discovery, identification and property maps. The purifier advertises writable power but returned seven empty state values in one response. Previously the client only retried after a timeout, so an empty response left all readings unknown and controls unavailable.
 
-Added the "UDP discovery broadcast address" option, Local protocol diagnostic attributes and "Download diagnostics" in HA. Diagnostics omit keys, module MAC, IP addresses and raw property values.
+Version 0.1.2 individually requests every missing or zero-length field, preserves valid batch data and exports safe response service codes and property lengths. Power controls still require an actual power reading and each write must be confirmed by state readback.
 
-Update Sharp Life AIR Local in HACS and restart Home Assistant. For HA 192.168.1.7 and purifier 192.168.1.32 on a /24 subnet, options may use bind IP 192.168.1.7 and directed broadcast 192.168.1.255. The default limited broadcast works without assuming a subnet mask.
+Update in HACS, restart Home Assistant, then press Refresh local connection. Connection options can remain unchanged. If readings are still missing, Download diagnostics now distinguishes successful and rejected individual responses.
 
-Fake-device protocol regression tests pass. Physical-device UDP readings and power control remain unconfirmed; this release provides the corrected exchange and evidence needed for that test. Modes and humidification are not implemented locally.
+21 fake-device regression tests pass, including empty Get_Res and Get_SNA responses. Physical individual reads and on/off still require verification on the purifier.
 
 For manual installation, extract sharp_life_air_local.zip into /config.

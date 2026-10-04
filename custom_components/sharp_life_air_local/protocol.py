@@ -255,6 +255,18 @@ class EchonetChannel:
                         or not set(properties).intersection(frame.properties)):
                     self.diagnostics["unmatched_frames"] += 1
                     continue
+                response = {
+                    "stage": self.diagnostics["stage"],
+                    "object_id": destination.hex(),
+                    "requested_codes": [f"{code:02X}" for code in properties],
+                    "esv": f"{frame.esv:02X}",
+                    "property_lengths": {
+                        f"{code:02X}": len(value) for code, value in frame.properties.items()
+                    },
+                }
+                history = self.diagnostics.setdefault("responses", [])
+                if len(history) < 32:
+                    history.append(response)
                 if esv == 0x61 and frame.esv != 0x71:
                     raise ProtocolError("Sharp rejected local power control")
                 return frame.properties
@@ -321,14 +333,23 @@ class EchonetChannel:
             try:
                 readings = await self.request(object_id, {code: b"" for code in codes})
             except TimeoutError:
-                # Older adapters can drop a mixed Get containing unsupported
-                # fields. Read the standard power field by itself in that case.
                 self.diagnostics["readings_timeout"] = True
-                if 0x80 in codes:
-                    try:
-                        readings = await self.request(object_id, {0x80: b""})
-                    except TimeoutError:
-                        pass
+            self.diagnostics["batch_property_lengths"] = {
+                f"{code:02X}": len(value) for code, value in readings.items()
+            }
+            # The physical KI-TX returns a valid response with zero-length
+            # values for a mixed Get. That must trigger isolated reads too,
+            # even though no timeout occurred. Preserve useful batch values.
+            for code in codes:
+                if readings.get(code):
+                    continue
+                self.diagnostics.setdefault("individual_read_codes", []).append(f"{code:02X}")
+                try:
+                    isolated = await self.request(object_id, {code: b""})
+                    if code in isolated:
+                        readings[code] = isolated[code]
+                except TimeoutError:
+                    self.diagnostics.setdefault("individual_timeouts", []).append(f"{code:02X}")
         self.diagnostics["property_lengths"] = {
             f"{code:02X}": len(value) for code, value in readings.items()
         }

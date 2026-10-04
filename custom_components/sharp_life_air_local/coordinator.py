@@ -26,7 +26,7 @@ class SharpLocalCoordinator(DataUpdateCoordinator):
 
     async def _async_update_data(self):
         try:
-            async with asyncio.timeout(40):
+            async with asyncio.timeout(55):
                 state = await self.client.update(
                     udp=self.entry.options.get(CONF_TEST_UDP, True),
                     broadcast=self.entry.options.get(CONF_BROADCAST, "255.255.255.255") or None,

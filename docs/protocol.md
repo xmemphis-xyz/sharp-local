@@ -50,7 +50,12 @@ read the state again and compare with the purifier. This client checks power
 readback up to three times after one Set command, and raises if the requested
 state cannot be confirmed. It never retries the Set command automatically.
 
-No UDP discovery response has yet been demonstrated on the physical device.
+Diagnostics from version 0.1.1 confirm four valid unicast UDP responses on the
+physical KI-TX100EU: node discovery, five-property identification, Get/Set maps,
+and a seven-property state Get. The discovered object is 013501. Its Set map
+advertises 80, 81, A0, F3, F4. All seven requested state values were zero-length.
+Version 0.1.2 individually retries each missing/empty state field and records
+response ESV plus property lengths; it never fabricates a power state.
 TCP succeeded across VLANs. UDP 8766 was open|filtered from diomedes; the
 same-subnet Termux tests failed at sendto with EPERM and therefore cannot
 establish whether the purifier answers same-subnet discovery.

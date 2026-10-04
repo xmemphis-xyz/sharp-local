@@ -8,7 +8,11 @@ required. Separate from [Sharp Life AIR cloud](https://github.com/xmemphis-xyz/s
 
 KI-TX100EU answered TCP 8765 from another subnet. The official app's handshake,
 HMAC-signed `get_info` response and module firmware `1.0.1` were verified on the
-physical device. This release implements that exchange and local diagnostics.
+physical device. Module firmware `1.0.4` has since been reported. Physical
+UDP discovery, purifier identification and Get/Set maps are also confirmed.
+The device advertises power Set support but returned empty values to the
+seven-property state Get. Version 0.1.2 retries missing/empty fields separately.
+Physical state readback and power control still require verification.
 
 **Full local purifier control is not yet confirmed on KI-TX100EU.** The TCP
 commands found in the APK configure the Wi-Fi module, rather than control the
@@ -43,7 +47,7 @@ cloud terminal registrations. Use a DHCP reservation for the purifier.
 
 - Module firmware, module flags, and Local protocol diagnostic sensors.
 - Local protocol attributes show discovery method, stage, packet counters,
-  property codes and lengths. **Download diagnostics** exports the same evidence
+  property codes, lengths, and response service codes. **Download diagnostics** exports the same evidence
   without keys, module MAC, IP addresses or raw property values.
 - Refresh local connection button.
 - Power, temperature and humidity sensors appear when UDP returns these fields.

@@ -1,7 +1,7 @@
 {
   "domain": "sharp_life_air_local",
   "name": "Sharp Life AIR Local",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "config_flow": true,
   "documentation": "https://github.com/xmemphis-xyz/sharp-local",
   "issue_tracker": "https://github.com/xmemphis-xyz/sharp-local/issues",

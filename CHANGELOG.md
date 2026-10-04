@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.1.2
+
+- Retry every missing or zero-length state field with a single-property Get.
+- Preserve valid values from partial batch responses; do not repeat successful reads.
+- Record response service codes and property lengths for every accepted exchange.
+- Add regressions for empty Get_Res/Get_SNA batches and still-empty individual reads.
+
+A physical KI-TX100EU now confirms unicast UDP discovery, identification and
+Get/Set maps. Its batch state response contains seven zero-length values;
+individual reads and physical power control still require device verification.
+
 ## 0.1.1
 
 - Try broadcast and multicast after unanswered unicast discovery, following the APK.
