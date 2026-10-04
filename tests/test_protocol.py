@@ -39,7 +39,8 @@ class FakePurifier(asyncio.DatagramProtocol):
                  drop_maps=False, partial_maps=False, drop_batch=False,
                  ignore_write=False, empty_batch_esv=None, partial_batch=False,
                  empty_all_readings=False, source=None, reply_port=None,
-                 wrong_destination=False, drop_read_codes=()):
+                 wrong_destination=False, drop_read_codes=(), state_source=None,
+                 writable_by_source=None, drop_maps_source=None):
         self.writable = writable
         self.reject = reject
         self.wrong_first = wrong_first
@@ -54,6 +55,9 @@ class FakePurifier(asyncio.DatagramProtocol):
         self.reply_port = reply_port
         self.wrong_destination = wrong_destination
         self.drop_read_codes = drop_read_codes
+        self.state_source = state_source
+        self.writable_by_source = writable_by_source or {}
+        self.drop_maps_source = drop_maps_source
         self.received = []
         self.object_id = bytes.fromhex("013502")
         self.power = b"\x30"
@@ -72,28 +76,32 @@ class FakePurifier(asyncio.DatagramProtocol):
         self.received.append(request)
         if self.source is not None and request.source != self.source:
             return
+        state_allowed = self.state_source is None or request.source == self.state_source
         if request.destination == p.NODE:
             props = {0xD6: b"\x01" + self.object_id, 0x8C: b"test-module"}
         elif 0x8A in request.properties:
             props = {0x8A: b"\x00\x00\x05", 0x8C: b"test-purifier",
                      0xF0: b"", 0xFC: b"", 0xFD: b""}
         elif request.esv == 0x61:
-            if not self.reject and not self.ignore_write:
+            rejected = self.reject or not state_allowed
+            if not rejected and not self.ignore_write:
                 self.power = request.properties[0x80]
-            self.send(response(request, {0x80: b""}, 0x51 if self.reject else 0x71), address)
+            self.send(response(request, {0x80: b""}, 0x51 if rejected else 0x71), address)
             return
         elif 0x9E in request.properties:
-            if self.drop_maps:
+            if self.drop_maps or request.source == self.drop_maps_source:
                 return
             if self.partial_maps:
                 self.send(response(request, {0x9F: b"\x01\x80"}, 0x52), address)
                 return
-            props = {0x9E: b"\x01\x80" if self.writable else b"\x00",
+            writable = self.writable_by_source.get(request.source, self.writable)
+            props = {0x9E: b"\x01\x80" if writable else b"\x00",
                      0x9F: b"\x03\x80\x84\xf1"}
         else:
             if len(request.properties) == 1 and next(iter(request.properties)) in self.drop_read_codes:
                 return
-            if self.empty_all_readings or (self.empty_batch_esv is not None and len(request.properties) > 1):
+            if (not state_allowed or self.empty_all_readings
+                    or (self.empty_batch_esv is not None and len(request.properties) > 1)):
                 props = {code: b"" for code in request.properties}
                 self.send(response(request, props, self.empty_batch_esv or 0x52), address)
                 return
@@ -407,6 +415,8 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         fakes = []
         for port, source, options in ((3610, p.CONTROLLER, standard or {}),
                                      (8766, p.SOURCE, app or {})):
+            options = dict(options)
+            source = options.pop("source", source)
             fake = FakePurifier(source=source, reply_port=port, **options)
             transport, _ = await asyncio.get_running_loop().create_datagram_endpoint(
                 lambda fake=fake: fake, local_addr=("127.0.0.2", port))
@@ -447,7 +457,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_maps_from_app_do_not_enable_writes_on_read_only_standard_channel(self):
         client, (standard, app), info = await self.devices(
-            standard={"writable": False}, app={"empty_all_readings": True})
+            standard={"writable": False}, app={"empty_all_readings": True, "source": None})
         with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
             state = await client.update(broadcast=None)
         self.assertEqual(state.udp_port, 3610)
@@ -460,7 +470,7 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_both_channels_reject_state_without_exposing_controls(self):
         client, fakes, info = await self.devices(
-            standard={"empty_all_readings": True}, app={"empty_all_readings": True})
+            standard={"empty_all_readings": True}, app={"empty_all_readings": True, "source": None})
         with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
             state = await client.update(broadcast=None)
         self.assertEqual(state.udp_status, "no_readings")
@@ -468,7 +478,9 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(state.udp_port)
         self.assertFalse(state.power_controllable)
         evidence = state.udp_diagnostics["transports"]
-        self.assertEqual([item["status"] for item in evidence], ["no_readings", "no_readings"])
+        self.assertEqual([item["status"] for item in evidence], ["no_readings"] * 3)
+        self.assertEqual(evidence[-1]["source_object"], "05ff01")
+        self.assertEqual(evidence[-1]["sent"], 1)
         for item in evidence:
             singles = [entry for entry in item["responses"] if entry["requested_codes"] == ["80"]]
             self.assertEqual(singles[0]["esv"], "52")
@@ -495,6 +507,127 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(state.power_controllable for state in states))
         self.assertTrue(all(state.udp_port == 3610 for state in states))
         self.assertEqual(len([frame for frame in standard.received if frame.destination == p.NODE]), 2)
+
+    async def test_controller_source_on_app_port_gets_its_own_power_and_permission(self):
+        client, (standard, app), info = await self.devices(
+            standard={"empty_all_readings": True},
+            app={"source": None, "state_source": p.CONTROLLER})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertTrue(state.power_controllable)
+        self.assertEqual((state.udp_port, state.source_object), (8766, p.CONTROLLER))
+        self.assertEqual(state.object_id, app.object_id)
+        controller_reads = [frame for frame in app.received if frame.source == p.CONTROLLER]
+        self.assertEqual([list(frame.properties) for frame in controller_reads], [[0x80], [0x9E, 0x9F]])
+        self.assertTrue(all(frame.esv == 0x62 for frame in app.received + standard.received))
+        await client.set_power(False)
+        writes = [frame for frame in app.received if frame.esv == 0x61]
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0].source, p.CONTROLLER)
+        self.assertEqual(app.power, b"\x31")
+        self.assertFalse(any(frame.esv == 0x61 for frame in standard.received))
+
+    async def test_controller_source_cannot_inherit_app_source_set_map(self):
+        client, (_, app), info = await self.devices(
+            standard={"empty_all_readings": True},
+            app={"source": None, "state_source": p.CONTROLLER,
+                 "writable_by_source": {p.CONTROLLER: False}})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.udp_status, "read_only")
+        self.assertEqual(state.source_object, p.CONTROLLER)
+        self.assertEqual(state.properties, {0x80: b"\x30"})
+        self.assertFalse(state.power_controllable)
+        self.assertEqual(state.udp_diagnostics["transports"][1]["writable_codes"], ["80"])
+        self.assertEqual(state.udp_diagnostics["transports"][2]["writable_codes"], [])
+        with self.assertRaises(p.ProtocolError):
+            await client.set_power(False)
+        self.assertFalse(any(frame.esv == 0x61 for frame in app.received))
+
+    async def test_controller_power_read_without_own_map_stays_read_only(self):
+        client, (_, app), info = await self.devices(
+            standard={"empty_all_readings": True},
+            app={"source": None, "state_source": p.CONTROLLER,
+                 "drop_maps_source": p.CONTROLLER})
+        open_channel = client._channel
+
+        def channel(**kwargs):
+            result = open_channel(**kwargs)
+            result.timeout = 0.05
+            return result
+
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)), \
+                patch.object(client, "_channel", side_effect=channel):
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.udp_status, "read_only")
+        self.assertEqual(state.properties, {0x80: b"\x30"})
+        self.assertFalse(state.power_controllable)
+        self.assertEqual(state.udp_diagnostics["transports"][-1]["sent"], 2)
+        self.assertFalse(any(frame.esv == 0x61 for frame in app.received))
+
+    async def test_controller_source_timeout_preserves_app_evidence_and_tcp(self):
+        client, (_, app), info = await self.devices(
+            standard={"empty_all_readings": True}, app={"empty_all_readings": True})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)), \
+                patch.object(p, "UDP_POWER_PROBE_TIMEOUT", 0.05):
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.module.version, "1.0.4")
+        self.assertEqual(state.udp_status, "no_readings")
+        self.assertFalse(state.power_controllable)
+        self.assertEqual(state.udp_diagnostics["transports"][-1]["status"], "no_response")
+        self.assertTrue(state.udp_diagnostics["transports"][-1]["probe_timeout"])
+        self.assertFalse(any(frame.esv == 0x61 for frame in app.received))
+
+    async def test_confirmed_app_transport_is_tried_first_on_later_polls(self):
+        for controller in (False, True):
+            with self.subTest(controller=controller):
+                client, (standard, app), info = await self.devices(
+                    standard={"empty_all_readings": True},
+                    app={"source": None, "state_source": p.CONTROLLER} if controller else {})
+                with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+                    first = await client.update(broadcast=None)
+                    before_standard = len(standard.received)
+                    before_app = len(app.received)
+                    second = await client.update(broadcast=None)
+                self.assertTrue(first.power_controllable and second.power_controllable)
+                self.assertEqual(len(standard.received), before_standard)
+                self.assertEqual(len(second.udp_diagnostics["transports"]), 1)
+                expected_source = p.CONTROLLER if controller else p.SOURCE
+                self.assertTrue(all(frame.source == expected_source for frame in app.received[before_app:]))
+                self.assertFalse(any(frame.esv == 0x61 for frame in app.received))
+                # Close the fake endpoints before reusing their fixed ports.
+                standard.transport.close()
+                app.transport.close()
+                await asyncio.sleep(0)
+                await asyncio.sleep(0)
+
+    async def test_lost_cached_controller_capability_falls_back_to_app_source(self):
+        client, (standard, app), info = await self.devices(
+            standard={"empty_all_readings": True},
+            app={"source": None, "state_source": p.CONTROLLER})
+        with patch.object(p, "get_info", new=AsyncMock(return_value=info)):
+            initial = await client.update(broadcast=None)
+            self.assertEqual(initial.source_object, p.CONTROLLER)
+            app.state_source = p.SOURCE
+            state = await client.update(broadcast=None)
+        self.assertTrue(state.power_controllable)
+        self.assertEqual(state.source_object, p.SOURCE)
+        self.assertEqual([entry["port"] for entry in state.udp_diagnostics["transports"]], [8766, 3610, 8766])
+        self.assertFalse(any(frame.esv == 0x61 for frame in app.received + standard.received))
+
+    async def test_changed_tcp_identity_does_not_reuse_cached_controller_profile(self):
+        client, (standard, app), info = await self.devices(
+            standard={"empty_all_readings": True},
+            app={"source": None, "state_source": p.CONTROLLER})
+        changed = p.ModuleInfo("1.0.4", 2, "different-module")
+        with patch.object(p, "get_info", new=AsyncMock(side_effect=[info, changed])):
+            await client.update(broadcast=None)
+            before_app = len(app.received)
+            standard.empty_all_readings = False
+            state = await client.update(broadcast=None)
+        self.assertEqual(state.udp_port, 3610)
+        self.assertEqual(len(app.received), before_app)
+        self.assertEqual(state.udp_diagnostics["transports"][0]["discovery_method"], "unicast")
 
 
 if __name__ == "__main__":

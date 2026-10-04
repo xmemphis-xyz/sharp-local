@@ -60,6 +60,26 @@ is allowed. Never combine app metadata with readings from a different endpoint
 to infer write permission. Power commands and readback reuse the selected
 port/source pair. Local mode, humidification and firmware writes remain absent.
 
+The two uploaded 0.1.3 diagnostics have identical results: six discovery
+requests on 3610/05ff01 receive zero frames; eleven exchanges on 8766/05fe01
+confirm metadata and reject state. This does not prove that port 3610 is closed.
+
+Version 0.1.4 adds one controlled, unverified comparison: send a single Get 80
+to the air-cleaner EOJ confirmed by app discovery, on port 8766 with controller
+source 05ff01. This isolates source-object selection without changing the
+responding endpoint or guessing an instance. If power is neither 30 nor 31,
+stop. If it is valid, read 9E/9F using the same controller source. A missing,
+invalid or read-only controller Set map does not permit writes, regardless of
+the app source's map. Power control uses 8766/05ff01 only if both checks succeed.
+This experiment sends at most two Get requests in a 4.5-second budget; update
+never sends a Set. It initially exposes only power if this profile is selected.
+
+After a successful poll, try the confirmed port/source first on later polls.
+Revalidate its state and Set map; do not reuse stale write permission. If it
+fails, fall back to the other profiles without repeating a profile in that
+poll. A changed TCP module identity disables this preference. This avoids
+waiting for silent standard discovery before every working app-port refresh.
+
 Missing maps do not gate read-only state reads; a missing Set map prevents
 power writes. Partial Get_SNA replies preserve supported values. Empty or
 missing fields trigger individual reads. Each endpoint has a 20-second probe
@@ -69,7 +89,8 @@ process already listening on the port produces `port_in_use`, rather than
 silently moving to an ephemeral port. Socket closure releases the port before
 the next entry starts.
 
-Diagnostics include `selected_port` (null if no state endpoint was selected)
+Diagnostics include `selected_port` and `selected_source_object`
+(null if no state endpoint was selected)
 and separate `transports` evidence with the destination port, bind port,
 source EOJ, stage, counters, ESV and property lengths. IPs, keys, MAC addresses
 and raw property values are excluded.
@@ -84,8 +105,9 @@ state cannot be confirmed. It never retries the Set command automatically.
 
 Physical KI-TX100EU app discovery reports EOJ 013501. Its Set map advertises
 80, 81, A0, F3, F4. Module firmware is currently reported as 1.0.4 and flags
-as 0x0002; no interpretation of those flag bits has been verified. Standard
-3610 state reads and physical power control still require device validation.
+as 0x0002; no interpretation of those flag bits has been verified.
+3610 discovery receives no responses in the current configuration. Physical
+8766/05ff01 power reads and control still require device validation.
 TCP succeeded across VLANs. UDP 8766 was open|filtered from diomedes; the
 same-subnet Termux tests failed at sendto with EPERM and therefore cannot
 establish whether the purifier answers same-subnet discovery.
@@ -93,7 +115,8 @@ establish whether the purifier answers same-subnet discovery.
 ## Next evidence needed
 
 Update HACS and restart HA, then use Refresh local connection and Download
-diagnostics. Inspect the 3610 transport and `selected_port`. The standalone
+diagnostics. Inspect the 8766/05ff01 power probe, `selected_port` and
+`selected_source_object`. The standalone
 probe can provide the same read-only evidence from a host on the purifier LAN.
 If valid power state and Set support are returned, test conditional power
 off/on in HA and compare with the physical device. Local

@@ -1,9 +1,10 @@
 """Sharp local protocol, independent of Home Assistant and cloud services.
 
 TCP 8765 get_info and UDP 8766 discovery follow Sharp Life AIR EU 1.0.4.
-State/control first use standard ECHONET UDP 3610 and controller 05ff01.
-The app transport is a separate fallback. A write requires a valid power read
-and Set map from the same transport. KI-TX100EU control remains unverified.
+Initial state/control probes use standard ECHONET UDP 3610/05ff01, then the
+app transport. A bounded 8766/05ff01 power probe is experimental. A write
+requires a valid power read and Set map from the same transport. Confirmed
+transports are preferred on later polls. KI-TX100EU control is unverified.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ TCP_PORT = 8765
 UDP_PORT = 8766
 ECHONET_PORT = 3610
 UDP_PROBE_TIMEOUT = 20
+UDP_POWER_PROBE_TIMEOUT = 4.5
 MULTICAST = "224.0.23.0"
 SOURCE = bytes.fromhex("05fe01")
 CONTROLLER = bytes.fromhex("05ff01")
@@ -409,6 +411,31 @@ class EchonetChannel:
         self.diagnostics["stage"] = "complete"
         return object_id, writable, {code: value for code, value in readings.items() if value}
 
+    async def probe_power(self, object_id):
+        """Compare the controller source on a confirmed app endpoint.
+
+        This is an experimental read-only capability probe. Do not reuse the
+        app source's Set map to grant permission to the controller source.
+        """
+        self.object_id = object_id
+        self.diagnostics["object_id"] = object_id.hex()
+        self.diagnostics["discovery_method"] = "known_app_object"
+        self.diagnostics["stage"] = "power_probe"
+        power = await self.request(object_id, {0x80: b""})
+        self.diagnostics["property_lengths"] = {"80": len(power.get(0x80, b""))}
+        if power.get(0x80) not in (b"\x30", b"\x31"):
+            self.diagnostics["stage"] = "complete"
+            return
+        self.properties[0x80] = power[0x80]
+        self.diagnostics["stage"] = "property_maps"
+        maps = await self.request(object_id, {0x9E: b"", 0x9F: b""})
+        writable = property_map(maps.get(0x9E, b""))
+        readable = property_map(maps.get(0x9F, b""))
+        self.writable = writable
+        self.diagnostics["writable_codes"] = [f"{code:02X}" for code in sorted(writable)]
+        self.diagnostics["readable_codes"] = [f"{code:02X}" for code in sorted(readable)]
+        self.diagnostics["stage"] = "complete"
+
 
 class SharpLocalClient:
     def __init__(self, host: str, *, tcp_port=TCP_PORT, bind_ip="0.0.0.0", bind_port=None):
@@ -423,13 +450,16 @@ class SharpLocalClient:
         return EchonetChannel(self.host, port=port, source=source,
                               bind_ip=self.bind_ip, bind_port=self.bind_port)
 
-    async def _probe(self, module, port, source, broadcast):
+    async def _probe(self, module, port, source, broadcast, *, known_object=None):
         channel = self._channel(port=port, source=source)
         status = "no_readings"
-        budget = asyncio.timeout(UDP_PROBE_TIMEOUT)
+        budget = asyncio.timeout(UDP_POWER_PROBE_TIMEOUT if known_object else UDP_PROBE_TIMEOUT)
         try:
             async with budget, channel:
-                await channel.discover(broadcast=broadcast)
+                if known_object:
+                    await channel.probe_power(known_object)
+                else:
+                    await channel.discover(broadcast=broadcast)
         except TimeoutError:
             status = "no_response"
             if budget.expired():
@@ -459,11 +489,34 @@ class SharpLocalClient:
                 self.state = LocalState(module, "not_tested")
                 return self.state
             candidates = []
-            for port, source in ((ECHONET_PORT, CONTROLLER), (UDP_PORT, SOURCE)):
-                candidate = await self._probe(module, port, source, broadcast)
+            profiles = [(ECHONET_PORT, CONTROLLER, None), (UDP_PORT, SOURCE, None)]
+            previous = self.state
+            if (previous is not None and previous.power_controllable
+                    and previous.module.mac == module.mac
+                    and (previous.udp_port, previous.source_object) in (
+                        (ECHONET_PORT, CONTROLLER), (UDP_PORT, SOURCE), (UDP_PORT, CONTROLLER),
+                    )):
+                known_object = (previous.object_id if (previous.udp_port, previous.source_object)
+                                == (UDP_PORT, CONTROLLER) else None)
+                profiles.insert(0, (previous.udp_port, previous.source_object, known_object))
+            tested = set()
+            for port, source, known_object in profiles:
+                if (port, source) in tested:
+                    continue
+                tested.add((port, source))
+                candidate = await self._probe(module, port, source, broadcast, known_object=known_object)
                 candidates.append(candidate)
                 if candidate.power_controllable:
                     break
+            if not any(item.power_controllable for item in candidates):
+                app_object = next((item.object_id for item in candidates
+                                   if item.udp_diagnostics.get("port") == UDP_PORT
+                                   and item.udp_diagnostics.get("source_object") == SOURCE.hex()
+                                   and item.object_id is not None), None)
+                if app_object is not None and (UDP_PORT, CONTROLLER) not in tested:
+                    candidates.append(await self._probe(
+                        module, UDP_PORT, CONTROLLER, broadcast, known_object=app_object,
+                    ))
             # Prefer usable state; retain app metadata when neither can read.
             selected = max(candidates, key=lambda item: (
                 item.power_controllable, len(decode_readings(item.properties)),
@@ -471,6 +524,8 @@ class SharpLocalClient:
             ))
             evidence = dict(selected.udp_diagnostics)
             evidence["selected_port"] = selected.udp_port
+            evidence["selected_source_object"] = (selected.source_object.hex()
+                                                  if selected.source_object else None)
             evidence["transports"] = [item.udp_diagnostics for item in candidates]
             self.state = LocalState(module, selected.udp_status, selected.object_id,
                                     selected.properties, selected.set_map, evidence,

@@ -12,15 +12,17 @@ physical device. Module firmware `1.0.4` has since been reported. Physical
 UDP discovery, purifier identification and Get/Set maps are also confirmed.
 The app endpoint on UDP 8766 advertises power Set support but rejects both
 batch and individual state Gets with `Get_SNA (52)` and empty values.
-Version 0.1.3 separates this app endpoint from standard ECHONET UDP 3610.
-Physical state readback and power control on 3610 still require verification.
+Version 0.1.3 also sent six discovery requests to standard ECHONET UDP 3610,
+with no replies observed. Version 0.1.4 checks a further read-only hypothesis:
+controller source `05ff01` on the responding app port 8766. Its physical state
+readback and power control still require verification.
 
 **Full local purifier control is not yet confirmed on KI-TX100EU.** The TCP
 commands found in the APK configure the Wi-Fi module, rather than control the
 fan. This integration does not send firmware, registration, reset or unlink
 commands. Do not confuse module firmware with purifier firmware.
 
-The client first tries standard ECHONET UDP **3610**, with controller object
+On initial connection, the client first tries standard ECHONET UDP **3610**, with controller object
 `05ff01`, and binds local port 3610 to receive standard fixed-port replies.
 UDP 8766 with the app's source object `05fe01` is a separate fallback.
 Each endpoint discovers the actual purifier object, reads its property maps
@@ -30,6 +32,14 @@ A fan entity is added only if one endpoint both advertises writable power
 property `80` and returns a valid power state. Maps and readings from different
 ports are never combined to grant control. On/off uses that same port/source
 pair and requires both a SetC acknowledgement and matching state readback.
+If these endpoints cannot establish power capability and app discovery has
+confirmed the purifier object, an experimental probe requests power `80` from
+that object on **8766/05ff01**. Only a valid on/off value triggers a map read
+using that same source. This adds at most two Get requests, with a 4.5-second
+total budget. It grants no permission based on the app source's Set map.
+The comparison is unverified on KI-TX100EU; it does not establish that 8766
+accepts controller requests. A previously confirmed working endpoint is tried
+first on subsequent polls, with normal fallback if its capability disappears.
 There is no guessed TCP power command, no cloud fallback, and no local mode or
 humidification write in this release. An advertised capability still needs a
 physical-device test to confirm that it changes the requested state.
@@ -54,6 +64,7 @@ cloud terminal registrations. Use a DHCP reservation for the purifier.
 - Local protocol attributes show discovery method, stage, packet counters,
   property codes, lengths, and response service codes. `selected_port` identifies
   the state/control endpoint; `transports` records each tested port/source pair.
+  `selected_source_object` distinguishes the app and controller sources on 8766.
   **Download diagnostics** exports the same evidence
   without keys, module MAC, IP addresses or raw property values.
 - Refresh local connection button.
@@ -65,6 +76,7 @@ unknown. Missing UDP responses do not make a successful TCP connection fail.
 Each UDP endpoint has a 20-second probe budget. Completed readings survive
 timeouts on later optional fields. Multiple entries serialize access to the
 fixed UDP reply port; conflicts with another process are reported in diagnostics.
+The extra controller-source power comparison has its own 4.5-second budget.
 Under integration options, disable **Probe UDP purifier protocol** for TCP-only
 diagnostics, or set **Home Assistant local IPv4 address**. `0.0.0.0` selects the
 interface automatically. A specific bind address must exist on the HA host.

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.1.4
+
+- Compare controller source 05ff01 on app UDP 8766 after confirmed app discovery.
+- Start with a single read-only power Get; read the source's maps only for a valid power value.
+- Limit this experimental comparison to two Gets and 4.5 seconds; do not infer permission from app maps.
+- Prefer a previously confirmed working profile on later polls and fall back if it loses capability.
+- Revalidate Set permission every poll and disable the preference when TCP module identity changes.
+- Export the selected source object alongside the selected port.
+- Add tests for source-dependent reads/permissions, missing maps, timeouts and preferred-profile recovery.
+
+All 36 protocol tests pass. Physical 0.1.3 diagnostics show no replies on
+3610/05ff01 and rejected state reads on 8766/05fe01. The additional controller
+source on 8766 remains an unverified hypothesis for KI-TX100EU.
+
 ## 0.1.3
 
 - First probe standard ECHONET UDP 3610 with controller EOJ 05ff01.
