@@ -1,0 +1,56 @@
+name: Publish release
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - custom_components/sharp_life_air_local/manifest.json
+permissions:
+  contents: write
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Run regression tests and check syntax
+        run: |
+          python -m unittest discover -s tests -v
+          python -m compileall -q custom_components tests tools
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build integration archive
+        id: package
+        run: |
+          python - <<'PY'
+          import json, os, zipfile
+          from pathlib import Path
+          root = Path("custom_components/sharp_life_air_local")
+          version = json.loads((root / "manifest.json").read_text())["version"]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"tag=v{version}\n")
+          with zipfile.ZipFile("sharp_life_air_local.zip", "w", zipfile.ZIP_DEFLATED) as archive:
+              for path in sorted(root.rglob("*")):
+                  if path.is_file() and "__pycache__" not in path.parts:
+                      archive.write(path, str(path))
+          PY
+      - name: Publish release after tests pass
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.tag }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1
+          then
+            echo "Release already exists; refusing to replace it."
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" sharp_life_air_local.zip --target "$GITHUB_SHA" --title "Sharp Life AIR Local $RELEASE_TAG" --notes-file RELEASE_NOTES.md
