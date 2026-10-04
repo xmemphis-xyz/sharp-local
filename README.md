@@ -139,6 +139,46 @@ purifier's capabilities. Fix the local OS restriction before repeating it.
 The probe sends only read requests. Output omits the cloud key, MAC address,
 raw packets and unknown property values. Share this output for further analysis.
 
+## Manual power command experiment
+
+The user reports that the KI-TX100EU remains on during the rejected state Gets.
+Standby therefore does not explain the current observations. Get_SNA (52) is
+a response to a read; no physical power Set has yet been tested. The device's
+Set map advertises property 80, which provides a basis for an explicit write
+experiment without assuming that the write will work.
+
+The separate tool below verifies signed TCP info, freshly discovers the actual
+purifier object on 8766/05fe01, and checks that this endpoint advertises writable
+power. It sends at most one requested power command, then attempts one readback.
+It can physically turn the purifier off or on. It does not retry a power write,
+restore power automatically, change registrations or enable HA fan controls.
+The existing HA polling and the read-only probe continue to send only Gets.
+
+On diomedes, from the repository directory:
+
+```bash
+git pull --ff-only
+python3 tools/trial_power.py 192.168.1.32 off
+```
+
+Use on instead of off only when you want to test a separate ON command. Observe
+the physical purifier and share both that observation and the JSON report.
+
+| Outcome | Meaning |
+| --- | --- |
+| preparation_failed | TCP, discovery or map validation failed before a power write |
+| power_write_not_advertised | This endpoint did not advertise writable power; no Set sent |
+| write_rejected | A matching SetC_SNA (51) explicitly rejected the request |
+| write_unconfirmed | No valid acknowledgement; the physical effect is unknown |
+| acknowledged_unconfirmed | A matching Set_Res (71) arrived, but no valid power readback |
+| readback_mismatch | Acknowledgement arrived, but readback differs from the request |
+| verified_by_readback | Acknowledgement and matching on/off readback both arrived |
+
+Exit code 0 means matching readback, 2 means the write's effect remains
+unconfirmed, and 1 means preparation failed or the write was rejected. The
+report omits IPs, module MAC, keys and raw property values. An acknowledgement
+alone is not proof that the physical purifier changed state.
+
 ## Development
 
 ```bash

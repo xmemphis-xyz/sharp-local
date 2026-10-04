@@ -129,9 +129,22 @@ establish whether the purifier answers same-subnet discovery.
 ## Next evidence needed
 
 The source comparison is complete; repeating the same probe in unchanged
-conditions does not resolve the remaining protocol gap. The physical fan state
-and current registration status were not recorded alongside these diagnostics.
-Record that context before comparing a read under a different device condition.
+conditions does not resolve the remaining protocol gap. The user subsequently
+confirmed that the purifier remains on throughout the tests. Standby does not
+explain the rejected Gets. Current registration status was not recorded
+alongside these diagnostics.
+
+Get_SNA (52) applies to Get, while SetC has a separate Set_Res (71) or
+SetC_SNA (51) result (ECHONET Lite v1.14 Part 2, tables 3.9-3.11 and section
+6.2.5). The advertised Set map provides grounds for a manual power write trial;
+it does not establish that such a write will succeed.
+
+tools/trial_power.py is a separate, explicitly invoked experiment on the
+confirmed 8766/05fe01 profile. It requires fresh signed TCP info, fresh discovery
+and writable 80 in this source's map. It sends one requested SetC, never retries
+a write, and attempts one subsequent Get 80. A missing readback does not turn an
+acknowledgement into verified physical control. No normal HA capability rule
+is relaxed by this tool, and its output does not contain keys or raw values.
 
 Further implementation needs a valid state exchange on this exact model and
 firmware, or primary protocol/mode documentation that explains how to obtain one.
