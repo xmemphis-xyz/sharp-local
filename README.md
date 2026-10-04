@@ -24,6 +24,9 @@ fresh discovery and maps. Its eleven preparatory reads received replies, but
 the power write received none before timeout. The user confirmed that the
 purifier did not turn off. Neither power reads nor an effective power command
 have been established on this tested firmware/configuration.
+The latest physical display still reports **Pairing not registered**. This
+confirms incomplete app registration, but does not establish why local state
+reads and the power command failed.
 
 **Full local purifier control is not yet confirmed on KI-TX100EU.** The TCP
 commands found in the APK configure the Wi-Fi module, rather than control the
@@ -186,6 +189,54 @@ Exit code 0 means matching readback, 2 means the write's effect remains
 unconfirmed, and 1 means preparation failed or the write was rejected. The
 report omits IPs, module MAC, keys and raw property values. An acknowledgement
 alone is not proof that the physical purifier changed state.
+
+## Manual cloud-registration trial
+
+The supplied official EU app APK 1.0.4 contains a signed TCP 8765 command
+`0003` named register_on_server. It returns registration-specific result codes.
+`tools/trial_registration.py` sends at most one such command after validating
+module info and a fresh handshake. **This can ask the purifier to register
+with Sharp's cloud; it is not a read-only local probe.** No power, firmware,
+reset or unlink command is sent. The HA component does not run this tool.
+
+The app prepares a temporary cloud record before this command, then performs
+further account operations after a successful module response. The tool does
+not replace those steps. A reported module success does not prove complete
+account pairing or working local purifier control. A refusal outside the
+prepared app workflow is not proof that the same refusal caused the app issue.
+
+Update the clone before starting the attempt:
+
+```bash
+git -C /opt/sharp-local pull --ff-only
+```
+
+In the official app, resume pairing through **Already connected with a router**
+until the screen asks you to press Wi-Fi. Briefly press the dedicated physical
+Wi-Fi button and run this once from a computer on the purifier's LAN while
+the app remains on that step:
+
+```bash
+python3 /opt/sharp-local/tools/trial_registration.py 192.168.1.32 --register-on-server
+```
+
+Allow up to 30 seconds for the command reply, in addition to the preliminary
+TCP check. The tool never retries registration automatically. Share its JSON
+report and any changed purifier/app status. Reports omit keys, MAC addresses,
+IP addresses, and raw frames.
+
+| Registration code | Meaning in the app |
+| --- | --- |
+| 0 | Module reports registration success; account pairing still needs verification |
+| 1 | Module requested cancellation |
+| 2 | Module is not in cloud-registration mode |
+| 3 | Communication error with the cloud server |
+| 4 | Cloud server refused registration |
+
+An unknown code, unexpected reply or timeout is not success. Signed generic
+module errors are reported separately without an invented explanation. Exit
+code 0 means reported module success, 1 means a returned failure/unknown code
+or generic module error, and 2 means the result could not be established.
 
 ## Development
 

@@ -24,6 +24,47 @@ APK methods additionally use `0003` register_on_server, `0004` update_firmware,
 `0005` identify, and `0008` clear cloud link. None are purifier power/mode
 commands. They are deliberately absent from this client.
 
+## Separate manual registration experiment
+
+The supplied SHARP Life AIR EU APK 1.0.4 provides primary evidence in
+`r5/a.m(int, byte[])`, `r5/a.h()` and `PairingConfirmActivity$b.run()`:
+
+- Builder selector 2 emits a 36-byte signed request with payload `0003` and
+  no additional account, MAC or server-address fields.
+- `h()` calls this register_on_server command after the usual nonce handshake,
+  waits up to 30 seconds for a reply, and uses a 40-byte response buffer.
+- It verifies the response HMAC and recognizes generic error command `8fff`.
+  That branch reads a detail code at full-frame bytes 38-39. Other replies use
+  a signed big-endian result code at bytes 36-37 (payload offsets 2-3).
+- The pairing activity maps codes 0/1/2/3/4 to success, module cancellation,
+  not in cloud-registration mode, cloud communication error, and cloud refusal.
+  Other codes are internal/unknown results.
+
+The app first creates a `setting/tempBoxInfo` cloud record using the module
+identity. Its callback starts the registration loop; after module success it
+reads get_info again and proceeds to further cloud/account pairing operations.
+Sending `0003` alone is neither complete phone/account pairing nor proof of
+local-control capability. An app-prepared cloud context matters when interpreting
+the result; a standalone refusal cannot establish the cause of the app failure.
+
+`tools/trial_registration.py` is a separate explicit manual experiment, guarded
+by `--register-on-server`. It validates get_info, establishes a new handshake,
+and sends one signed `0003`, without retries. It requires an exact 40-byte signed
+reply. It expects `8003` as the command counterpart of `0003`, inferred from
+the request/reply convention including the physically verified `0002`/`8002`.
+The APK's `h()` does not explicitly check that counterpart and no physical
+KI-TX100EU registration reply has yet been captured. A different signed reply
+command is therefore reported as unexpected, not interpreted as success.
+Generic `8fff` errors retain the raw unsigned 16-bit detail code without a
+guessed meaning. The report omits identity, keys and raw frames, and always
+leaves app_pairing_verified false. Nothing imports this tool into the HA client.
+
+Local fake TCP tests exercise fragmented signed replies, all five documented
+codes, unknown codes, generic errors, unexpected commands, invalid signatures,
+wrong nonces, oversized/truncated responses, handshake failure, preflight
+failure and no automatic retry after a lost reply. These tests validate tool
+behavior, not the actual device or a working Sharp cloud registration.
+
 ## App discovery transport
 
 Official app discovery: UDP 8766, source `05fe01`, destination node `0ef001`,
@@ -131,8 +172,8 @@ establish whether the purifier answers same-subnet discovery.
 The source comparison is complete; repeating the same probe in unchanged
 conditions does not resolve the remaining protocol gap. The user subsequently
 confirmed that the purifier remains on throughout the tests. Standby does not
-explain the rejected Gets. Current registration status was not recorded
-alongside these diagnostics.
+explain the rejected Gets. A subsequent physical display observation confirms
+that app registration is still incomplete.
 
 Get_SNA (52) applies to Get, while SetC has a separate Set_Res (71) or
 SetC_SNA (51) result (ECHONET Lite v1.14 Part 2, tables 3.9-3.11 and section
@@ -155,12 +196,13 @@ that the purifier remained on. This is an unanswered, ineffective observed
 write, not an explicit SetC_SNA rejection and not proof that every possible
 local control path is unavailable.
 
-The latest purifier display's Wi-Fi network/registration status has not yet
-been established. The earlier display reported Pairing not registered, but
-that observation predates these firmware 1.0.4 diagnostics. Neither the
-firmware update nor flags 0x0002 proves successful registration or explains
-the unavailable state/control. A current status observation is needed before
-attributing the results to an authentication or mode requirement.
+The latest purifier display reports **Wi-Fi network status: Pairing not
+registered / Please register your air purifier to the App**, after the firmware
+1.0.4 diagnostics and unsuccessful OFF trial. Neither firmware 1.0.4 nor flags
+0x0002 proves successful registration. This confirms the missing registration
+but does not establish a causal link to the rejected state/control requests.
+The separate manual registration experiment above can capture the module's
+specific result at the failing app stage; it is not a local power workaround.
 
 Further implementation needs a valid state exchange on this exact model and
 firmware, or primary protocol/mode documentation that explains how to obtain one.
