@@ -136,6 +136,21 @@ TCP-only test:
 python3 tools/probe_local.py 192.168.1.32 --tcp-only
 ```
 
+If app discovery confirms an air-purifier object but standard UDP 3610 discovery
+gets no reply, test that **confirmed instance** directly. For the physical
+KI-TX100EU report, it is `013501`:
+
+```bash
+python3 tools/probe_local.py 192.168.1.32 --direct-object 013501
+```
+
+This explicit read-only mode validates signed TCP info and sends one unicast
+Get 80 on 3610/05ff01, without node discovery. Only a valid on/off reply leads
+to a second Get for this endpoint's own property maps. Its UDP budget is 4.5
+seconds. It sends no power or registration command. Normal HA polling does not
+run this extra experiment. Use an instance from a recent report for the same
+purifier address, rather than assuming that every device uses instance 01.
+
 On a machine actually connected to the purifier subnet, a directed broadcast
 can also be tested. Example for a /24 network and HA host address `192.168.1.7`:
 

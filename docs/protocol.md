@@ -211,11 +211,29 @@ establish whether the purifier answers same-subnet discovery.
 
 ## Next evidence needed
 
+Two further full probes following the registration trial return the same
+firmware 1.0.4, flags 0x0002 and transport results shown above. Neither returns
+power or other runtime state. The user describes the latest as after the
+purifier had stopped waiting for pairing. Exiting the pairing wait does not by itself
+confirm completed account registration, and these reports do not establish
+that pairing state explains the rejected local reads.
+
+The standard-port tests above only query the node profile for its instance
+list. Without a reply they never send a Get to the purifier object itself on
+3610. The explicit `tools/probe_local.py --direct-object 013501` mode covers
+that remaining distinction: use a purifier EOJ confirmed by recent app discovery,
+validate signed TCP info, and send one Get 80 on 3610/05ff01 with local bind
+3610. A valid 30/31 power value leads to one Get 9E/9F on that same profile;
+otherwise stop. Reuse the existing 4.5-second power-probe budget and strict
+peer/transaction/object validation. The app's Set map is never copied into
+this result. This is read-only CLI work, not a change to normal HA polling,
+and no physical result for the direct standard-port probe is available yet.
+
 The source comparison is complete; repeating the same probe in unchanged
 conditions does not resolve the remaining protocol gap. The user subsequently
 confirmed that the purifier remains on throughout the tests. Standby does not
-explain the rejected Gets. A subsequent physical display observation confirms
-that app registration is still incomplete.
+explain the rejected Gets. An earlier physical display observation confirmed
+that app registration was incomplete at that time.
 
 Get_SNA (52) applies to Get, while SetC has a separate Set_Res (71) or
 SetC_SNA (51) result (ECHONET Lite v1.14 Part 2, tables 3.9-3.11 and section
@@ -238,10 +256,10 @@ that the purifier remained on. This is an unanswered, ineffective observed
 write, not an explicit SetC_SNA rejection and not proof that every possible
 local control path is unavailable.
 
-The latest purifier display reports **Wi-Fi network status: Pairing not
+An earlier purifier display reported **Wi-Fi network status: Pairing not
 registered / Please register your air purifier to the App**, after the firmware
 1.0.4 diagnostics and unsuccessful OFF trial. Neither firmware 1.0.4 nor flags
-0x0002 proves successful registration. This confirms the missing registration
+0x0002 proves successful registration. That display confirmed missing registration
 but does not establish a causal link to the rejected state/control requests.
 The separate manual registration experiment above can capture the module's
 specific result at the failing app stage; it is not a local power workaround.

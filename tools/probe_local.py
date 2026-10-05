@@ -13,17 +13,42 @@ sys.modules[spec.name] = protocol
 spec.loader.exec_module(protocol)
 
 
-async def main(args):
-    client = protocol.SharpLocalClient(args.host, bind_ip=args.bind_ip)
+def air_object(value):
+    """Accept only a concrete air-purifier instance confirmed by discovery."""
     try:
-        state = await client.update(udp=not args.tcp_only, broadcast=args.broadcast)
+        object_id = bytes.fromhex(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("Use a confirmed air-purifier EOJ such as 013501") from error
+    if len(object_id) != 3 or object_id[:2] != bytes.fromhex("0135") or not object_id[2]:
+        raise argparse.ArgumentTypeError("Use a confirmed air-purifier EOJ such as 013501")
+    return object_id
+
+
+async def read_state(args):
+    client = protocol.SharpLocalClient(args.host, bind_ip=args.bind_ip)
+    if args.direct_object is not None:
+        module = await protocol.get_info(args.host)
+        # Reuse the bounded, read-only power probe with its own maps. Unlike
+        # normal polling, this explicit test bypasses node-list discovery on
+        # 3610 using an instance supplied from a recent discovery report.
+        return await client._probe(
+            module, protocol.ECHONET_PORT, protocol.CONTROLLER, None,
+            known_object=args.direct_object,
+        )
+    return await client.update(udp=not args.tcp_only, broadcast=args.broadcast)
+
+
+async def main(args):
+    try:
+        state = await read_state(args)
     except (OSError, TimeoutError, protocol.ProtocolError) as err:
         print(f"TCP: FAILED ({type(err).__name__})")
         return 1
     print("TCP 8765: signed get_info OK")
     print(f"Module firmware: {state.module.version}")
     print(f"Module flags: 0x{state.module.flags:04X}")
-    print(f"UDP 3610 / 8766: {state.udp_status}")
+    label = "UDP 3610 direct power probe" if args.direct_object is not None else "UDP 3610 / 8766"
+    print(f"{label}: {state.udp_status}")
     print(f"Selected state/control port: {state.udp_port or 'none'}")
     print("UDP diagnostics:", state.udp_diagnostics)
     if state.object_id:
@@ -40,5 +65,10 @@ if __name__ == "__main__":
     parser.add_argument("host", type=lambda value: str(ipaddress.IPv4Address(value)))
     parser.add_argument("--bind-ip", default="0.0.0.0", type=lambda value: str(ipaddress.IPv4Address(value)))
     parser.add_argument("--broadcast", default="255.255.255.255", type=lambda value: str(ipaddress.IPv4Address(value)), help="Broadcast address in the purifier subnet (default: limited broadcast)")
-    parser.add_argument("--tcp-only", action="store_true")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--tcp-only", action="store_true")
+    mode.add_argument(
+        "--direct-object", type=air_object,
+        help="Read power on UDP 3610 for an EOJ confirmed by recent discovery; bypass node discovery",
+    )
     raise SystemExit(asyncio.run(main(parser.parse_args())))
