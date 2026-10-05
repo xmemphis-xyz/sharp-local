@@ -50,6 +50,8 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
     phase = "preflight"
     try:
         info = await protocol.get_info(host, port=port)
+        # These values are observed before the registration request, not
+        # read back afterwards. Flags do not establish registration success.
         report["module_firmware"] = info.version
         report["module_flags"] = f"0x{info.flags:04X}"
 
@@ -72,6 +74,7 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
             report["registration_request"] = "sent"
             await writer.drain()
             phase = "reply"
+            report["reply_stage"] = "header"
             header = await reader.readexactly(2)
             size = int.from_bytes(header, "big")
             report["reply_length"] = size
@@ -80,11 +83,13 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
             # needs only 38 bytes: length + HMAC + command + result code.
             if not 36 <= size <= 40:
                 raise protocol.ProtocolError("Unexpected registration response length")
+            report["reply_stage"] = "body"
             body = await reader.readexactly(size - 2)
             payload = body[32:]
             expected = hmac.digest(key, nonce + payload, "sha256")
             if not hmac.compare_digest(expected, body[:32]):
                 raise protocol.ProtocolError("Invalid Sharp response signature")
+            report["reply_stage"] = "signature_verified"
             report["reply_command"] = payload[:2].hex()
             if payload[:2] == b"\x8f\xff":
                 # The error detail is at frame bytes 38-39, only if present.
@@ -106,6 +111,11 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
             phase = "complete"
     except (OSError, TimeoutError, asyncio.IncompleteReadError, protocol.ProtocolError) as error:
         report["error_type"] = type(error).__name__
+        if isinstance(error, asyncio.IncompleteReadError):
+            # Preserve only counts, never partial bytes (which could contain
+            # nonce, signature or other data). An EOF does not authorize retry.
+            report["read_expected_bytes"] = error.expected
+            report["read_received_bytes"] = len(error.partial)
         if isinstance(error, protocol.ProtocolError):
             report["error_reason"] = str(error)
         if isinstance(error, OSError) and error.errno is not None:

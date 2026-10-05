@@ -77,11 +77,33 @@ The parser fix follows the app's declared-length validation. Check the current
 purifier/app status before deciding whether another manual attempt is needed;
 do not repeat registration if pairing has already completed.
 
+Subsequent TCP-only testing first returned ConnectionRefusedError, then a valid
+signed get_info with firmware 1.0.4 and flags 0x0002. The user confirmed that
+the HA integration was already disabled. The latest one-shot registration trial
+completed get_info and the nonce handshake, sent its registration request, and
+ended with IncompleteReadError in phase reply, without a reply_length field.
+Since that field is assigned only after both header bytes arrive, the read
+ended before obtaining a complete two-byte header. No response command, result
+code or signature was available. This EOF is not an explicit registration
+refusal and does not verify success or any physical effect.
+
+The latest trial's flags 0x0003 were read during **preflight**, before its
+registration request; the preceding TCP-only probe reported 0x0002. No meaning
+of these bits has been verified, and this change is not a post-command readback
+or proof of completed app/cloud registration. Current physical network/pairing
+status remains needed before attributing a cause or making another write.
+
+The tool now records reply_stage (header, body, signature_verified). On an EOF
+it exports the expected and received byte counts for the failed read, without
+partial data. These diagnostics do not change request framing, start another
+attempt, or relax any HA capability check.
+
 Local fake TCP tests exercise fragmented headers and signed 38-/40-byte replies,
 all five documented codes in both sizes, unknown codes, generic errors with
 and without detail, signed replies missing their result, unexpected commands,
 invalid signatures, wrong nonces, oversized/undersized/truncated responses,
-incorrect declared lengths, handshake/preflight failure and no automatic retry
+incorrect declared lengths, EOF before any or all header bytes with preflight
+flags 0x0003, handshake/preflight failure and no automatic retry
 after a lost reply. These tests validate tool behavior, not the actual device
 or a working Sharp cloud registration.
 

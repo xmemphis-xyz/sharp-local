@@ -19,7 +19,7 @@ spec.loader.exec_module(trial)
 
 class RegistrationTests(unittest.IsolatedAsyncioTestCase):
     async def run_with_module(self, *, code=0, fault=None, reply_command=b"\x80\x03",
-                              extra=b"\x00\x09", reply_payload=None):
+                              extra=b"\x00\x09", reply_payload=None, module_flags=2):
         requests = []
         errors = []
         connections = 0
@@ -50,10 +50,12 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(request[2:34], hmac.digest(
                     trial.protocol.protocol_key(), nonce + request[34:], "sha256"))
                 if request[34:] == b"\x00\x02":
-                    payload = (b"\x80\x02\x01\x00\x00\x04\x00\x02"
+                    payload = (b"\x80\x02\x01\x00\x00\x04" + module_flags.to_bytes(2, "big")
                                + b"S" * 256 + bytes.fromhex("010203040506"))
                 else:
                     self.assertEqual(request[34:], b"\x00\x03")
+                    if fault == "close_before_header":
+                        return
                     if fault == "timeout":
                         self.assertEqual(await reader.read(), b"")
                         return
@@ -77,6 +79,8 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 # Exercise a fragmented length header as well as body chunks.
                 writer.write(data[:1])
                 await writer.drain()
+                if connection_number == 2 and fault == "partial_header":
+                    return
                 await asyncio.sleep(0.001)
                 for start in range(1, len(data), 7):
                     writer.write(data[start:start + 7])
@@ -195,6 +199,22 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(report["registration_code"])
         self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
 
+    async def test_eof_before_complete_header_preserves_counts_without_retry(self):
+        for fault, received in (("close_before_header", 0), ("partial_header", 1)):
+            with self.subTest(fault=fault):
+                report, requests = await self.run_with_module(fault=fault, module_flags=3)
+                self.assertEqual(report["registration_request"], "sent")
+                self.assertEqual(report["outcome"], "registration_unconfirmed")
+                self.assertEqual(report["error_type"], "IncompleteReadError")
+                self.assertEqual(report["reply_stage"], "header")
+                self.assertEqual(report["read_expected_bytes"], 2)
+                self.assertEqual(report["read_received_bytes"], received)
+                self.assertEqual(report["module_flags"], "0x0003")
+                self.assertIsNone(report["registration_code"])
+                self.assertNotIn("reply_length", report)
+                self.assertNotIn("partial", report)
+                self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
+
     async def test_invalid_reply_integrity_and_structure_stay_unconfirmed(self):
         for fault in ("signature", "wrong_nonce", "length", "undersized", "truncate", "short_length"):
             for extra in (b"", b"\x00\x09"):
@@ -204,6 +224,10 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(report["registration_code"])
                     self.assertNotIn("reply_command", report)
                     self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
+                    if fault == "truncate":
+                        self.assertEqual(report["reply_stage"], "body")
+                        self.assertEqual(report["read_expected_bytes"], 36 + len(extra))
+                        self.assertEqual(report["read_received_bytes"], 35 + len(extra))
 
     async def test_invalid_registration_handshake_sends_no_registration(self):
         report, requests = await self.run_with_module(fault="handshake")

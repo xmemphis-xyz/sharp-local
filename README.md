@@ -232,6 +232,12 @@ Allow up to 30 seconds for the command reply, in addition to the preliminary
 TCP check. The tool never retries registration automatically. Share its JSON
 report and any changed purifier/app status. Reports omit keys, MAC addresses,
 IP addresses, and raw frames.
+Module firmware and flags are read **before** the registration command; they
+are not post-command confirmation. `reply_stage` distinguishes reading the
+header, reading the body, and a fully signed reply. An IncompleteReadError adds
+only `read_expected_bytes` and `read_received_bytes` for that read, never the
+partial data. The latest reported trial had preflight flags 0x0003 and ended
+before a complete reply header; neither observation proves successful pairing.
 
 | Registration code | Meaning in the app |
 | --- | --- |
