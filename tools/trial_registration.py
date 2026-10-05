@@ -75,9 +75,10 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
             header = await reader.readexactly(2)
             size = int.from_bytes(header, "big")
             report["reply_length"] = size
-            # r5/a.h() in EU APK 1.0.4 reads a 40-byte reply. Do not parse
-            # a different frame layout or assume success from its first bytes.
-            if size != 40:
+            # r5/a.h() allocates a 40-byte buffer, while r5/a.d() validates
+            # the length declared in the frame (36..40). A normal result
+            # needs only 38 bytes: length + HMAC + command + result code.
+            if not 36 <= size <= 40:
                 raise protocol.ProtocolError("Unexpected registration response length")
             body = await reader.readexactly(size - 2)
             payload = body[32:]
@@ -86,13 +87,17 @@ async def run_trial(host, *, register_on_server=False, port=protocol.TCP_PORT,
                 raise protocol.ProtocolError("Invalid Sharp response signature")
             report["reply_command"] = payload[:2].hex()
             if payload[:2] == b"\x8f\xff":
-                # The app recognizes 8fff, then reads the final 16-bit detail.
-                # Keep the detail as an unsigned code, without inventing a meaning.
-                report["module_error_code"] = int.from_bytes(payload[4:6], "big")
+                # The error detail is at frame bytes 38-39, only if present.
+                # Do not substitute zero-filled buffer bytes for missing data
+                # or interpret this error's first field as a registration result.
+                report["module_error_code"] = (int.from_bytes(payload[4:6], "big")
+                                               if len(payload) >= 6 else None)
                 report["outcome"] = "module_error"
             elif payload[:2] == b"\x80\x03":
                 # Expected counterpart of 0003, inferred from the app's
                 # request/reply convention; not yet captured on KI-TX100EU.
+                if len(payload) < 4:
+                    raise protocol.ProtocolError("Missing registration result")
                 code = int.from_bytes(payload[2:4], "big", signed=True)
                 report["registration_code"] = code
                 report["outcome"] = RESULTS.get(code, "unknown_registration_code")

@@ -18,7 +18,8 @@ spec.loader.exec_module(trial)
 
 
 class RegistrationTests(unittest.IsolatedAsyncioTestCase):
-    async def run_with_module(self, *, code=0, fault=None, reply_command=b"\x80\x03"):
+    async def run_with_module(self, *, code=0, fault=None, reply_command=b"\x80\x03",
+                              extra=b"\x00\x09", reply_payload=None):
         requests = []
         errors = []
         connections = 0
@@ -56,7 +57,8 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                     if fault == "timeout":
                         self.assertEqual(await reader.read(), b"")
                         return
-                    payload = reply_command + code.to_bytes(2, "big", signed=True) + b"\x00\x09"
+                    payload = (reply_payload if reply_payload is not None else
+                               reply_command + code.to_bytes(2, "big", signed=True) + extra)
                 signing_nonce = bytes(16) if fault == "wrong_nonce" and connection_number == 2 else nonce
                 signature = hmac.digest(trial.protocol.protocol_key(), signing_nonce + payload, "sha256")
                 if ((fault == "preflight_signature" and connection_number == 1)
@@ -65,10 +67,18 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
                 size = len(payload) + 34
                 if connection_number == 2 and fault == "length":
                     size = 5000
+                elif connection_number == 2 and fault == "undersized":
+                    size = 35
+                elif connection_number == 2 and fault == "short_length":
+                    size -= 2
                 data = size.to_bytes(2, "big") + signature + payload
                 if connection_number == 2 and fault == "truncate":
-                    data = data[:37]
-                for start in range(0, len(data), 7):
+                    data = data[:-1]
+                # Exercise a fragmented length header as well as body chunks.
+                writer.write(data[:1])
+                await writer.drain()
+                await asyncio.sleep(0.001)
+                for start in range(1, len(data), 7):
                     writer.write(data[start:start + 7])
                     await writer.drain()
                     await asyncio.sleep(0)
@@ -111,24 +121,45 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         for secret in ("127.0.0.1", "010203040506", "SSSS", trial.protocol.protocol_key().hex()):
             self.assertNotIn(secret, encoded)
 
+    async def test_signed_fragmented_38_byte_success(self):
+        report, requests = await self.run_with_module(extra=b"")
+        self.assertEqual(report["reply_length"], 38)
+        self.assertEqual(report["reply_command"], "8003")
+        self.assertEqual(report["registration_code"], 0)
+        self.assertEqual(report["outcome"], "module_registration_reported_success")
+        self.assertFalse(report["app_pairing_verified"])
+        self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
+
     async def test_app_result_codes_are_not_reported_as_success(self):
         for code, meaning in {
             1: "cancelled_by_module", 2: "not_in_cloud_registration_mode",
             3: "cloud_communication_error", 4: "server_rejected_registration",
         }.items():
-            with self.subTest(code=code):
-                report, requests = await self.run_with_module(code=code)
-                self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
-                self.assertEqual(report["registration_code"], code)
-                self.assertEqual(report["outcome"], meaning)
-                self.assertFalse(report["app_pairing_verified"])
+            for extra in (b"", b"\x00\x09"):
+                with self.subTest(code=code, length=38 + len(extra)):
+                    report, requests = await self.run_with_module(code=code, extra=extra)
+                    self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
+                    self.assertEqual(report["registration_code"], code)
+                    self.assertEqual(report["outcome"], meaning)
+                    self.assertFalse(report["app_pairing_verified"])
 
     async def test_unknown_signed_result_stays_unknown(self):
         for code in (37, -1):
-            with self.subTest(code=code):
-                report, requests = await self.run_with_module(code=code)
-                self.assertEqual(report["registration_code"], code)
-                self.assertEqual(report["outcome"], "unknown_registration_code")
+            for extra in (b"", b"\x00\x09"):
+                with self.subTest(code=code, length=38 + len(extra)):
+                    report, requests = await self.run_with_module(code=code, extra=extra)
+                    self.assertEqual(report["registration_code"], code)
+                    self.assertEqual(report["outcome"], "unknown_registration_code")
+                    self.assertEqual(requests.count(b"\x00\x03"), 1)
+
+    async def test_signed_reply_missing_result_does_not_default_to_zero(self):
+        for payload in (b"\x80\x03", b"\x80\x03\x00"):
+            with self.subTest(length=len(payload) + 34):
+                report, requests = await self.run_with_module(reply_payload=payload)
+                self.assertEqual(report["outcome"], "registration_unconfirmed")
+                self.assertIsNone(report["registration_code"])
+                self.assertEqual(report["error_reason"], "Missing registration result")
+                self.assertEqual(report["reply_command"], "8003")
                 self.assertEqual(requests.count(b"\x00\x03"), 1)
 
     async def test_generic_module_error_uses_8fff_and_final_detail(self):
@@ -137,6 +168,17 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["outcome"], "module_error")
         self.assertEqual(report["module_error_code"], 9)
         self.assertEqual(requests.count(b"\x00\x03"), 1)
+
+    async def test_short_generic_error_does_not_invent_a_detail_or_success(self):
+        for padding in range(4):
+            with self.subTest(length=36 + padding):
+                report, requests = await self.run_with_module(
+                    reply_payload=b"\x8f\xff" + bytes(padding))
+                self.assertEqual(report["outcome"], "module_error")
+                self.assertIsNone(report["registration_code"])
+                self.assertIsNone(report["module_error_code"])
+                self.assertFalse(report["app_pairing_verified"])
+                self.assertEqual(requests.count(b"\x00\x03"), 1)
 
     async def test_unexpected_signed_reply_does_not_parse_zero_as_success(self):
         report, requests = await self.run_with_module(reply_command=b"\x80\x05")
@@ -154,13 +196,14 @@ class RegistrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
 
     async def test_invalid_reply_integrity_and_structure_stay_unconfirmed(self):
-        for fault in ("signature", "wrong_nonce", "length", "truncate"):
-            with self.subTest(fault=fault):
-                report, requests = await self.run_with_module(fault=fault)
-                self.assertEqual(report["outcome"], "registration_unconfirmed")
-                self.assertIsNone(report["registration_code"])
-                self.assertNotIn("reply_command", report)
-                self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
+        for fault in ("signature", "wrong_nonce", "length", "undersized", "truncate", "short_length"):
+            for extra in (b"", b"\x00\x09"):
+                with self.subTest(fault=fault, length=38 + len(extra)):
+                    report, requests = await self.run_with_module(fault=fault, extra=extra)
+                    self.assertEqual(report["outcome"], "registration_unconfirmed")
+                    self.assertIsNone(report["registration_code"])
+                    self.assertNotIn("reply_command", report)
+                    self.assertEqual(requests, [b"\x00\x02", b"\x00\x03"])
 
     async def test_invalid_registration_handshake_sends_no_registration(self):
         report, requests = await self.run_with_module(fault="handshake")

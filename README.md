@@ -24,7 +24,8 @@ fresh discovery and maps. Its eleven preparatory reads received replies, but
 the power write received none before timeout. The user confirmed that the
 purifier did not turn off. Neither power reads nor an effective power command
 have been established on this tested firmware/configuration.
-The latest physical display still reports **Pairing not registered**. This
+The last supplied physical display, before the registration trial, reported
+**Pairing not registered**. This
 confirms incomplete app registration, but does not establish why local state
 reads and the power command failed.
 
@@ -205,6 +206,13 @@ not replace those steps. A reported module success does not prove complete
 account pairing or working local purifier control. A refusal outside the
 prepared app workflow is not proof that the same refusal caused the app issue.
 
+The first physical trial received a frame header declaring 38 bytes. An earlier
+tool version incorrectly required exactly 40 bytes and rejected that header
+before reading the result or checking the signature. The corrected parser uses
+the declared frame length; a normal result fits in 38 bytes. The earlier report
+cannot establish whether registration succeeded. First check the purifier/app
+status, and make another manual attempt only if pairing remains incomplete.
+
 Update the clone before starting the attempt:
 
 ```bash
@@ -233,8 +241,9 @@ IP addresses, and raw frames.
 | 3 | Communication error with the cloud server |
 | 4 | Cloud server refused registration |
 
-An unknown code, unexpected reply or timeout is not success. Signed generic
-module errors are reported separately without an invented explanation. Exit
+An unknown code, unexpected reply or timeout is not success. Missing result
+bytes are not treated as code 0. Signed generic module errors are reported
+separately; a missing error detail stays null. Exit
 code 0 means reported module success, 1 means a returned failure/unknown code
 or generic module error, and 2 means the result could not be established.
 

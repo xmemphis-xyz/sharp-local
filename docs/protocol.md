@@ -33,6 +33,9 @@ The supplied SHARP Life AIR EU APK 1.0.4 provides primary evidence in
   no additional account, MAC or server-address fields.
 - `h()` calls this register_on_server command after the usual nonce handshake,
   waits up to 30 seconds for a reply, and uses a 40-byte response buffer.
+- The shared `d()` validator accepts the length declared in the frame header,
+  from 36 bytes to the buffer capacity. The 40-byte buffer is not a requirement
+  for a 40-byte frame. A normal command plus result fits in a 38-byte frame.
 - It verifies the response HMAC and recognizes generic error command `8fff`.
   That branch reads a detail code at full-frame bytes 38-39. Other replies use
   a signed big-endian result code at bytes 36-37 (payload offsets 2-3).
@@ -49,21 +52,38 @@ the result; a standalone refusal cannot establish the cause of the app failure.
 
 `tools/trial_registration.py` is a separate explicit manual experiment, guarded
 by `--register-on-server`. It validates get_info, establishes a new handshake,
-and sends one signed `0003`, without retries. It requires an exact 40-byte signed
-reply. It expects `8003` as the command counterpart of `0003`, inferred from
+and sends one signed `0003`, without retries. It reads exactly the frame length
+declared in the header, bounded to 36-40 bytes, and verifies the HMAC before
+interpreting its contents. A normal result requires at least 38 bytes; missing
+result bytes are never decoded as zero. It expects `8003` as the command
+counterpart of `0003`, inferred from
 the request/reply convention including the physically verified `0002`/`8002`.
 The APK's `h()` does not explicitly check that counterpart and no physical
-KI-TX100EU registration reply has yet been captured. A different signed reply
-command is therefore reported as unexpected, not interpreted as success.
+KI-TX100EU registration reply command or result has yet been verified. A
+different signed reply command is reported as unexpected, not as success.
 Generic `8fff` errors retain the raw unsigned 16-bit detail code without a
-guessed meaning. The report omits identity, keys and raw frames, and always
+guessed meaning, only when all detail bytes are present. A shorter signed error
+still reports module_error, with module_error_code null; it does not borrow
+zero-filled bytes from a buffer or decode the error as a registration result.
+The report omits identity, keys and raw frames, and always
 leaves app_pairing_verified false. Nothing imports this tool into the HA client.
 
-Local fake TCP tests exercise fragmented signed replies, all five documented
-codes, unknown codes, generic errors, unexpected commands, invalid signatures,
-wrong nonces, oversized/truncated responses, handshake failure, preflight
-failure and no automatic retry after a lost reply. These tests validate tool
-behavior, not the actual device or a working Sharp cloud registration.
+The first physical trial on module 1.0.4, flags 0x0002, sent one registration
+request and received a header declaring 38 bytes. The original tool mistakenly
+required exactly 40 bytes and rejected the header before reading the body or
+verifying its signature. No command, result code or complete raw response was
+retained, so that report cannot establish registration success or failure.
+The parser fix follows the app's declared-length validation. Check the current
+purifier/app status before deciding whether another manual attempt is needed;
+do not repeat registration if pairing has already completed.
+
+Local fake TCP tests exercise fragmented headers and signed 38-/40-byte replies,
+all five documented codes in both sizes, unknown codes, generic errors with
+and without detail, signed replies missing their result, unexpected commands,
+invalid signatures, wrong nonces, oversized/undersized/truncated responses,
+incorrect declared lengths, handshake/preflight failure and no automatic retry
+after a lost reply. These tests validate tool behavior, not the actual device
+or a working Sharp cloud registration.
 
 ## App discovery transport
 
